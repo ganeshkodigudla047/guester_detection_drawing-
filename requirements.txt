@@ -1,7 +1,6 @@
-opencv-python==4.9.0.80
-mediapipe==0.10.14
-numpy==1.26.4
-# 3D depth pipeline
-torch==2.2.2
-torchvision==0.17.2
-# torch.hub downloads MiDaS automatically on first use
+opencv-python==4.10.0.84
+mediapipe==0.10.33
+numpy==2.2.6
+# 3D depth pipeline (optional — app runs without it, depth mode disabled)
+torch==2.7.0
+torchvision==0.22.0
