@@ -1,60 +1,77 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Hand Gesture Drawing</title>
-<link rel="stylesheet" href="/static/css/style.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#111;color:#eee;font-family:Segoe UI,sans-serif;height:100vh;overflow:hidden;display:flex;flex-direction:column}
+#toolbar{display:flex;align-items:center;gap:12px;padding:6px 14px;background:rgba(20,20,20,.95);border-bottom:1px solid #333;flex-shrink:0;flex-wrap:wrap;z-index:10}
+.tlabel{font-size:11px;color:#888}
+#colors,#brushes,#actions,#mdisp{display:flex;align-items:center;gap:6px}
+.cbtn{width:26px;height:26px;border-radius:50%;border:2px solid transparent;cursor:pointer;transition:.15s}
+.cbtn:hover{transform:scale(1.2)}.cbtn.active{border-color:#fff;transform:scale(1.15)}
+.bbtn{padding:3px 10px;border-radius:6px;border:1px solid #555;background:#2a2a2a;color:#ccc;cursor:pointer;font-size:12px}
+.bbtn:hover{background:#3a3a3a}.bbtn.active{background:#555;color:#fff;border-color:#aaa}
+#actions button{padding:4px 12px;border-radius:6px;border:1px solid #555;background:#2a2a2a;color:#ccc;cursor:pointer;font-size:12px}
+#actions button:hover{background:#3a3a3a;color:#fff}
+#mdisp{margin-left:auto;gap:12px}
+#mlabel{font-size:13px;font-weight:700;letter-spacing:1px;color:#64ff96;min-width:90px;text-align:right}
+#fpslabel{font-size:11px;color:#666;min-width:55px}
+#wrap{position:relative;flex:1;overflow:hidden;background:#000}
+#webcam{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);z-index:0}
+#dc,#oc{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1}
+#oc{z-index:2;pointer-events:none}
+#banner{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:2.2rem;font-weight:900;letter-spacing:3px;padding:14px 40px;border-radius:14px;border:3px solid transparent;background:rgba(10,10,10,.85);pointer-events:none;opacity:0;transition:opacity .25s;z-index:100}
+#banner.show{opacity:1}
+#banner.undo{color:#6699ff;border-color:#6699ff}
+#banner.redo{color:#66ff88;border-color:#66ff88}
+#banner.move{color:#ffaa44;border-color:#ffaa44}
+#banner.erase{color:#ff5555;border-color:#ff5555}
+#banner.shape{color:#44ffcc;border-color:#44ffcc}
+#status{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.7);color:#aaa;font-size:13px;padding:6px 18px;border-radius:20px;pointer-events:none;z-index:50;transition:opacity .4s}
+#status.hidden{opacity:0}
+</style>
 </head>
 <body>
-<div id="app">
-  <!-- Top toolbar -->
-  <div id="toolbar">
-    <div id="colors">
-      <span class="tool-label">Color</span>
-      <button class="color-btn active" data-color="#ff0000" style="background:#ff0000"></button>
-      <button class="color-btn" data-color="#00cc00" style="background:#00cc00"></button>
-      <button class="color-btn" data-color="#0066ff" style="background:#0066ff"></button>
-      <button class="color-btn" data-color="#ffcc00" style="background:#ffcc00"></button>
-      <button class="color-btn" data-color="#ffffff" style="background:#ffffff"></button>
-      <button class="color-btn" data-color="#00ffff" style="background:#00ffff"></button>
-      <button class="color-btn" data-color="#cc00ff" style="background:#cc00ff"></button>
-    </div>
-    <div id="brushes">
-      <span class="tool-label">Size</span>
-      <button class="brush-btn" data-size="3">S</button>
-      <button class="brush-btn active" data-size="6">M</button>
-      <button class="brush-btn" data-size="10">L</button>
-      <button class="brush-btn" data-size="16">XL</button>
-    </div>
-    <div id="actions">
-      <button id="btn-undo" title="Undo (Ctrl+Z)">↩ Undo</button>
-      <button id="btn-redo" title="Redo (Ctrl+Y)">↪ Redo</button>
-      <button id="btn-clear" title="Clear canvas">🗑 Clear</button>
-      <button id="btn-save" title="Save image">💾 Save</button>
-    </div>
-    <div id="mode-display">
-      <span id="mode-label">IDLE</span>
-      <span id="fps-label">-- FPS</span>
-    </div>
+<div id="toolbar">
+  <div id="colors">
+    <span class="tlabel">Color</span>
+    <button class="cbtn active" data-c="#ff0000" style="background:#ff0000"></button>
+    <button class="cbtn" data-c="#00cc00" style="background:#00cc00"></button>
+    <button class="cbtn" data-c="#0066ff" style="background:#0066ff"></button>
+    <button class="cbtn" data-c="#ffcc00" style="background:#ffcc00"></button>
+    <button class="cbtn" data-c="#ffffff" style="background:#ffffff"></button>
+    <button class="cbtn" data-c="#00ffff" style="background:#00ffff"></button>
+    <button class="cbtn" data-c="#cc00ff" style="background:#cc00ff"></button>
   </div>
-
-  <!-- Canvas stack: video behind, canvases on top -->
-  <div id="canvas-wrap">
-    <video id="webcam" autoplay playsinline muted></video>
-    <canvas id="bg-canvas"></canvas>
-    <canvas id="draw-canvas"></canvas>
-    <canvas id="overlay-canvas"></canvas>
+  <div id="brushes">
+    <span class="tlabel">Size</span>
+    <button class="bbtn" data-s="3">S</button>
+    <button class="bbtn active" data-s="6">M</button>
+    <button class="bbtn" data-s="10">L</button>
+    <button class="bbtn" data-s="16">XL</button>
   </div>
-
-  <!-- Action flash banner -->
-  <div id="action-banner"></div>
-
-  <!-- Status / permission message -->
-  <div id="status-msg">Requesting camera access…</div>
+  <div id="actions">
+    <button id="bundo">&#8617; Undo</button>
+    <button id="bredo">&#8618; Redo</button>
+    <button id="bclear">&#128465; Clear</button>
+    <button id="bsave">&#128190; Save</button>
+  </div>
+  <div id="mdisp">
+    <span id="mlabel">IDLE</span>
+    <span id="fpslabel">-- FPS</span>
+  </div>
 </div>
-
-<!-- MediaPipe Hands via CDN -->
+<div id="wrap">
+  <video id="webcam" autoplay playsinline muted></video>
+  <canvas id="dc"></canvas>
+  <canvas id="oc"></canvas>
+</div>
+<div id="banner"></div>
+<div id="status">Requesting camera access&hellip;</div>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 <script src="/static/js/gesture.js"></script>
 </body>
