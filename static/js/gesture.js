@@ -27,13 +27,11 @@ const UNDO_MAX        = 30;
 const DEBOUNCE_FRAMES = 3;
 
 // ── DOM refs ─────────────────────────────────────────────────
-const video       = document.getElementById('webcam');
-const bgCanvas    = document.getElementById('bg-canvas');
-const drawCanvas  = document.getElementById('draw-canvas');
+const video         = document.getElementById('webcam');
+const drawCanvas    = document.getElementById('draw-canvas');
 const overlayCanvas = document.getElementById('overlay-canvas');
-const bctx        = bgCanvas.getContext('2d');
-const dctx        = drawCanvas.getContext('2d');
-const octx        = overlayCanvas.getContext('2d');
+const dctx          = drawCanvas.getContext('2d');
+const octx          = overlayCanvas.getContext('2d');
 const modeLabel   = document.getElementById('mode-label');
 const fpsLabel    = document.getElementById('fps-label');
 const statusMsg   = document.getElementById('status-msg');
@@ -112,17 +110,30 @@ document.addEventListener('keydown', e => {
   if (e.ctrlKey && (e.key === 'y' || e.key === 'Z')) doRedo();
 });
 
-// ── Canvas resize ────────────────────────────────────────────
-function resizeCanvases() {
-  const w = drawCanvas.offsetWidth;
-  const h = drawCanvas.offsetHeight;
-  const img = dctx.getImageData(0, 0, drawCanvas.width, drawCanvas.height);
-  bgCanvas.width      = w;  bgCanvas.height      = h;
-  drawCanvas.width    = w;  drawCanvas.height    = h;
-  overlayCanvas.width = w;  overlayCanvas.height = h;
-  dctx.putImageData(img, 0, 0);
+// ── Canvas resize — match pixel dims to CSS layout size ──────
+function syncCanvasSize() {
+  const wrap = document.getElementById('canvas-wrap');
+  const w = wrap.clientWidth;
+  const h = wrap.clientHeight;
+  if (w < 1 || h < 1) return;
+  [drawCanvas, overlayCanvas].forEach(c => {
+    if (c.width !== w || c.height !== h) {
+      // preserve drawing content
+      let saved = null;
+      if (c === drawCanvas && c.width > 0 && c.height > 0) {
+        saved = dctx.getImageData(0, 0, c.width, c.height);
+      }
+      c.width  = w;
+      c.height = h;
+      if (saved) dctx.putImageData(saved, 0, 0);
+    }
+  });
 }
-window.addEventListener('resize', resizeCanvases);
+
+// Keep canvases sized correctly whenever the window resizes
+const ro = new ResizeObserver(syncCanvasSize);
+ro.observe(document.getElementById('canvas-wrap'));
+window.addEventListener('resize', syncCanvasSize);
 
 // ── Undo / Redo ──────────────────────────────────────────────
 function snapshot() {
@@ -178,11 +189,11 @@ function applyCanvasTransform() {
 
 // ── Helpers ──────────────────────────────────────────────────
 function lm(landmarks, idx) {
-  // Returns {x, y} in pixel coords (canvas space)
+  // Canvas pixel coords — video is CSS-mirrored so we flip X here too
   const W = overlayCanvas.width;
   const H = overlayCanvas.height;
   return {
-    x: (1 - landmarks[idx].x) * W,   // mirror
+    x: (1 - landmarks[idx].x) * W,
     y: landmarks[idx].y * H
   };
 }
@@ -666,54 +677,17 @@ hands.onResults(onResults);
 async function startCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 1280, height: 720, facingMode: 'user' },
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
       audio: false
     });
     video.srcObject = stream;
     await video.play();
 
-    // Set canvas sizes as soon as we have video dimensions
-    function syncSizes() {
-      const w = video.videoWidth  || video.offsetWidth  || 1280;
-      const h = video.videoHeight || video.offsetHeight || 720;
-      if (w > 0 && h > 0) {
-        [bgCanvas, drawCanvas, overlayCanvas].forEach(c => {
-          if (c.width !== w || c.height !== h) {
-            // preserve drawing canvas content
-            let saved = null;
-            if (c === drawCanvas && c.width > 0) {
-              saved = dctx.getImageData(0, 0, c.width, c.height);
-            }
-            c.width  = w;
-            c.height = h;
-            if (saved) dctx.putImageData(saved, 0, 0);
-          }
-        });
-      }
-    }
+    // Sync canvas pixel size once video is playing
+    video.addEventListener('playing', syncCanvasSize);
+    syncCanvasSize();
 
-    video.addEventListener('loadedmetadata', syncSizes);
-    video.addEventListener('playing', syncSizes);
-
-    // Continuously paint mirrored video onto bg-canvas via rAF
-    // This is independent of MediaPipe so the feed always shows
-    function paintVideo() {
-      if (!video.paused && !video.ended && video.readyState >= 2) {
-        syncSizes();
-        const w = bgCanvas.width, h = bgCanvas.height;
-        if (w > 0 && h > 0) {
-          bctx.save();
-          bctx.translate(w, 0);
-          bctx.scale(-1, 1);
-          bctx.drawImage(video, 0, 0, w, h);
-          bctx.restore();
-        }
-      }
-      requestAnimationFrame(paintVideo);
-    }
-    requestAnimationFrame(paintVideo);
-
-    // MediaPipe hands — send frames for gesture detection
+    // MediaPipe Camera utility — feeds frames to hands model
     const camera = new Camera(video, {
       onFrame: async () => { await hands.send({ image: video }); },
       width: 1280, height: 720
