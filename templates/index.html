@@ -1,0 +1,62 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Hand Gesture Drawing</title>
+<link rel="stylesheet" href="/static/css/style.css"/>
+</head>
+<body>
+<div id="app">
+  <!-- Top toolbar -->
+  <div id="toolbar">
+    <div id="colors">
+      <span class="tool-label">Color</span>
+      <button class="color-btn active" data-color="#ff0000" style="background:#ff0000"></button>
+      <button class="color-btn" data-color="#00cc00" style="background:#00cc00"></button>
+      <button class="color-btn" data-color="#0066ff" style="background:#0066ff"></button>
+      <button class="color-btn" data-color="#ffcc00" style="background:#ffcc00"></button>
+      <button class="color-btn" data-color="#ffffff" style="background:#ffffff"></button>
+      <button class="color-btn" data-color="#00ffff" style="background:#00ffff"></button>
+      <button class="color-btn" data-color="#cc00ff" style="background:#cc00ff"></button>
+    </div>
+    <div id="brushes">
+      <span class="tool-label">Size</span>
+      <button class="brush-btn" data-size="3">S</button>
+      <button class="brush-btn active" data-size="6">M</button>
+      <button class="brush-btn" data-size="10">L</button>
+      <button class="brush-btn" data-size="16">XL</button>
+    </div>
+    <div id="actions">
+      <button id="btn-undo" title="Undo (Ctrl+Z)">↩ Undo</button>
+      <button id="btn-redo" title="Redo (Ctrl+Y)">↪ Redo</button>
+      <button id="btn-clear" title="Clear canvas">🗑 Clear</button>
+      <button id="btn-save" title="Save image">💾 Save</button>
+    </div>
+    <div id="mode-display">
+      <span id="mode-label">IDLE</span>
+      <span id="fps-label">-- FPS</span>
+    </div>
+  </div>
+
+  <!-- Canvas stack -->
+  <div id="canvas-wrap">
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="draw-canvas"></canvas>
+    <canvas id="overlay-canvas"></canvas>
+  </div>
+
+  <!-- Action flash banner -->
+  <div id="action-banner"></div>
+
+  <!-- Status / permission message -->
+  <div id="status-msg">Requesting camera access…</div>
+</div>
+
+<!-- MediaPipe Hands via CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="/static/js/gesture.js"></script>
+</body>
+</html>
