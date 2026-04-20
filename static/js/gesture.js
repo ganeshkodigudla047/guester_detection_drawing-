@@ -28,8 +28,10 @@ const DEBOUNCE_FRAMES = 3;
 
 // ── DOM refs ─────────────────────────────────────────────────
 const video       = document.getElementById('webcam');
+const bgCanvas    = document.getElementById('bg-canvas');
 const drawCanvas  = document.getElementById('draw-canvas');
 const overlayCanvas = document.getElementById('overlay-canvas');
+const bctx        = bgCanvas.getContext('2d');
 const dctx        = drawCanvas.getContext('2d');
 const octx        = overlayCanvas.getContext('2d');
 const modeLabel   = document.getElementById('mode-label');
@@ -114,10 +116,10 @@ document.addEventListener('keydown', e => {
 function resizeCanvases() {
   const w = drawCanvas.offsetWidth;
   const h = drawCanvas.offsetHeight;
-  // Preserve drawing on resize
   const img = dctx.getImageData(0, 0, drawCanvas.width, drawCanvas.height);
-  drawCanvas.width  = w;  drawCanvas.height  = h;
-  overlayCanvas.width = w; overlayCanvas.height = h;
+  bgCanvas.width      = w;  bgCanvas.height      = h;
+  drawCanvas.width    = w;  drawCanvas.height    = h;
+  overlayCanvas.width = w;  overlayCanvas.height = h;
   dctx.putImageData(img, 0, 0);
 }
 window.addEventListener('resize', resizeCanvases);
@@ -399,6 +401,14 @@ function drawCleanShape(result) {
 
 // ── Main MediaPipe result handler ────────────────────────────
 function onResults(results) {
+  // ── Draw mirrored webcam feed onto bg-canvas ──────────────
+  const W = overlayCanvas.width;
+  const H = overlayCanvas.height;
+  bctx.save();
+  bctx.translate(W, 0);
+  bctx.scale(-1, 1);
+  bctx.drawImage(video, 0, 0, W, H);
+  bctx.restore();
   // FPS
   frameCount++;
   const now = performance.now();
@@ -669,12 +679,12 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play();
 
-    // Size canvases to match video
     video.addEventListener('loadedmetadata', () => {
-      drawCanvas.width    = video.videoWidth;
-      drawCanvas.height   = video.videoHeight;
-      overlayCanvas.width = video.videoWidth;
-      overlayCanvas.height = video.videoHeight;
+      const w = video.videoWidth  || 1280;
+      const h = video.videoHeight || 720;
+      bgCanvas.width      = w;  bgCanvas.height      = h;
+      drawCanvas.width    = w;  drawCanvas.height    = h;
+      overlayCanvas.width = w;  overlayCanvas.height = h;
     });
 
     const camera = new Camera(video, {

@@ -95,22 +95,19 @@ body {
 }
 
 #webcam {
+  /* hidden — we draw it manually onto bg-canvas each frame */
+  display: none;
+}
+
+#bg-canvas, #draw-canvas, #overlay-canvas {
   position: absolute;
   top: 0; left: 0;
   width: 100%; height: 100%;
-  object-fit: cover;
-  transform: scaleX(-1);   /* mirror */
-  z-index: 0;
 }
 
-#draw-canvas, #overlay-canvas {
-  position: absolute;
-  top: 0; left: 0;
-  width: 100%; height: 100%;
-  z-index: 1;
-}
-
-#overlay-canvas { z-index: 2; pointer-events: none; }
+#bg-canvas      { z-index: 0; }   /* mirrored webcam feed */
+#draw-canvas    { z-index: 1; }   /* user drawings        */
+#overlay-canvas { z-index: 2; pointer-events: none; }  /* hand skeleton + UI */
 
 /* ── Action banner ── */
 #action-banner {
