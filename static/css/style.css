@@ -95,7 +95,7 @@ body {
 }
 
 #webcam {
-  /* hidden — we draw it manually onto bg-canvas each frame */
+  /* hidden — painted manually onto bg-canvas via rAF */
   display: none;
 }
 
@@ -103,11 +103,12 @@ body {
   position: absolute;
   top: 0; left: 0;
   width: 100%; height: 100%;
+  display: block;
 }
 
-#bg-canvas      { z-index: 0; }   /* mirrored webcam feed */
-#draw-canvas    { z-index: 1; }   /* user drawings        */
-#overlay-canvas { z-index: 2; pointer-events: none; }  /* hand skeleton + UI */
+#bg-canvas      { z-index: 0; background: #000; }
+#draw-canvas    { z-index: 1; }
+#overlay-canvas { z-index: 2; pointer-events: none; }
 
 /* ── Action banner ── */
 #action-banner {

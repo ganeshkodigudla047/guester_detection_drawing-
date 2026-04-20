@@ -401,14 +401,8 @@ function drawCleanShape(result) {
 
 // ── Main MediaPipe result handler ────────────────────────────
 function onResults(results) {
-  // ── Draw mirrored webcam feed onto bg-canvas ──────────────
   const W = overlayCanvas.width;
   const H = overlayCanvas.height;
-  bctx.save();
-  bctx.translate(W, 0);
-  bctx.scale(-1, 1);
-  bctx.drawImage(video, 0, 0, W, H);
-  bctx.restore();
 
   // FPS
   frameCount++;
@@ -678,25 +672,61 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play();
 
-    video.addEventListener('loadedmetadata', () => {
-      const w = video.videoWidth  || 1280;
-      const h = video.videoHeight || 720;
-      bgCanvas.width      = w;  bgCanvas.height      = h;
-      drawCanvas.width    = w;  drawCanvas.height    = h;
-      overlayCanvas.width = w;  overlayCanvas.height = h;
-    });
+    // Set canvas sizes as soon as we have video dimensions
+    function syncSizes() {
+      const w = video.videoWidth  || video.offsetWidth  || 1280;
+      const h = video.videoHeight || video.offsetHeight || 720;
+      if (w > 0 && h > 0) {
+        [bgCanvas, drawCanvas, overlayCanvas].forEach(c => {
+          if (c.width !== w || c.height !== h) {
+            // preserve drawing canvas content
+            let saved = null;
+            if (c === drawCanvas && c.width > 0) {
+              saved = dctx.getImageData(0, 0, c.width, c.height);
+            }
+            c.width  = w;
+            c.height = h;
+            if (saved) dctx.putImageData(saved, 0, 0);
+          }
+        });
+      }
+    }
 
+    video.addEventListener('loadedmetadata', syncSizes);
+    video.addEventListener('playing', syncSizes);
+
+    // Continuously paint mirrored video onto bg-canvas via rAF
+    // This is independent of MediaPipe so the feed always shows
+    function paintVideo() {
+      if (!video.paused && !video.ended && video.readyState >= 2) {
+        syncSizes();
+        const w = bgCanvas.width, h = bgCanvas.height;
+        if (w > 0 && h > 0) {
+          bctx.save();
+          bctx.translate(w, 0);
+          bctx.scale(-1, 1);
+          bctx.drawImage(video, 0, 0, w, h);
+          bctx.restore();
+        }
+      }
+      requestAnimationFrame(paintVideo);
+    }
+    requestAnimationFrame(paintVideo);
+
+    // MediaPipe hands — send frames for gesture detection
     const camera = new Camera(video, {
-      onFrame: async () => { await hands.send({image: video}); },
+      onFrame: async () => { await hands.send({ image: video }); },
       width: 1280, height: 720
     });
     camera.start();
 
     statusMsg.textContent = 'Camera ready — raise your index finger to draw!';
     setTimeout(() => statusMsg.classList.add('hidden'), 3000);
+
   } catch (err) {
     statusMsg.textContent = `Camera error: ${err.message}`;
     statusMsg.style.color = '#ff5555';
+    console.error('Camera error:', err);
   }
 }
 
