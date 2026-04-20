@@ -35,7 +35,10 @@ let wasDrawing=false;
 let zInitD=0;
 let inZoom=false;
 let pinchActive=false, pinchStart=0, tapCount=0, lastTapEnd=0, lastAction=0;
+let pinchMoveDist=0, lastPinchPos=null;
 let moveAnchor=null;
+let isDragging=false, dragAnchor=null;
+let lastPalmDist=Infinity;
 let lastFT=performance.now(), fCount=0, bannerTmr=null;
 let inMenu=false, dwellTarget=null, dwellStart=0, dwellProg=0;
 
@@ -259,12 +262,23 @@ function debounce(raw){
 }
 
 // Pinch tap/hold
-function updatePinch(p){
+function updatePinch(p, mx, my){
   const now=performance.now()/1000;
-  if(p&&!pinchActive){pinchActive=true;pinchStart=now;}
+  if(p&&!pinchActive){
+    pinchActive=true;pinchStart=now;
+    pinchMoveDist=0;
+    lastPinchPos={x:mx,y:my};
+  }
+  else if(p&&pinchActive){
+    if(lastPinchPos){
+      pinchMoveDist+=Math.hypot(mx-lastPinchPos.x,my-lastPinchPos.y);
+      lastPinchPos={x:mx,y:my};
+    }
+  }
   else if(!p&&pinchActive){
     const dur=now-pinchStart;pinchActive=false;
-    if(dur<TAP_MAX){
+    // Reject tap if it moved too far (was a drag)
+    if(dur<TAP_MAX && pinchMoveDist<30){
       if(tapCount===1&&now-lastTapEnd<DBL_SECS){if(now-lastAction>=COOLDOWN){doRedo();lastAction=now;}tapCount=0;}
       else{tapCount=1;lastTapEnd=now;}
     }
@@ -381,6 +395,7 @@ function onResults(res){
   // TWO HANDS ZOOM
   if(hs.length===2){
     const p0=pinching(hs[0]),p1=pinching(hs[1]);
+
     if(p0&&p1){
       const t0=lm(hs[0],4),i0=lm(hs[0],8),t1=lm(hs[1],4),i1=lm(hs[1],8);
       const m0={x:(t0.x+i0.x)/2,y:(t0.y+i0.y)/2},m1={x:(t1.x+i1.x)/2,y:(t1.y+i1.y)/2};
@@ -407,9 +422,10 @@ function onResults(res){
       if(inZoom) snap(); // state change
       inZoom=false;
     }
-    prevPt=null;smoothPt=null;return;
+    prevPt=null;smoothPt=null;isDragging=false;return;
   }
   inZoom=false;
+  lastPalmDist=Infinity;
 
   // ONE HAND
   if(hs.length===1){
@@ -445,15 +461,15 @@ function onResults(res){
       }
       
       octx.beginPath();octx.arc(ecx,ecy,ERASER_R,0,Math.PI*2);octx.strokeStyle='#ff4444';octx.lineWidth=2;octx.stroke();
-      setMode('ERASE','#ff5555');prevPt=null;finishStroke();inMenu=false;
+      setMode('ERASE','#ff5555');prevPt=null;finishStroke();inMenu=false;isDragging=false;
 
     }else if(mode==='MOVE'){
-      updatePinch(false); // don't trigger undo/redo tap detector
-      const mx=(ix+tt.x)/2,my=(iy+tt.y)/2;
       const p = pinching(lms);
+      const mx=(ix+tt.x)/2,my=(iy+tt.y)/2;
+      updatePinch(p, mx, my); // allow tap detector to run
       
-      if (p && !pinchActive) {
-         pinchActive = true;
+      if (p && !isDragging) {
+         isDragging = true;
          // Select object
          const found = findNearestStroke(mx, my);
          if (!selectedStroke || (found && selectedStroke.id !== found.id)) {
@@ -463,18 +479,18 @@ function onResults(res){
             selectedStroke = null;
             renderStrokes();
          }
-         moveAnchor = {x: mx, y: my};
-      } else if (p && pinchActive) {
-         if (selectedStroke && moveAnchor) {
-            const dx = mx - moveAnchor.x;
-            const dy = my - moveAnchor.y;
+         dragAnchor = {x: mx, y: my};
+      } else if (p && isDragging) {
+         if (selectedStroke && dragAnchor) {
+            const dx = mx - dragAnchor.x;
+            const dy = my - dragAnchor.y;
             moveStroke(selectedStroke, dx, dy);
             renderStrokes();
-            moveAnchor = {x: mx, y: my};
+            dragAnchor = {x: mx, y: my};
          }
-      } else if (!p && pinchActive) {
-         pinchActive = false;
-         moveAnchor = null;
+      } else if (!p && isDragging) {
+         isDragging = false;
+         dragAnchor = null;
          snap(); // End of drag
          // Release deselects
          selectedStroke = null;
@@ -486,11 +502,11 @@ function onResults(res){
       setMode('MOVE','#ffaa44');prevPt=null;finishStroke();inMenu=false;
 
     }else if(mode==='MENU'){
-      inMenu=true;updatePinch(false);drawMenu({x:ix,y:iy});setMode('MENU','#ff88ff');prevPt=null;finishStroke();
+      inMenu=true;updatePinch(false);drawMenu({x:ix,y:iy});setMode('MENU','#ff88ff');prevPt=null;finishStroke();isDragging=false;
 
     }else if(mode==='DRAW'){
       if(inMenu){inMenu=false;dwellTarget=null;}
-      updatePinch(false);setMode('DRAW','#64ff96');
+      updatePinch(false);setMode('DRAW','#64ff96');isDragging=false;
       
       octx.beginPath();octx.arc(ix,iy,brush/2+3,0,Math.PI*2);octx.fillStyle=color;octx.fill();octx.strokeStyle='#fff';octx.lineWidth=1;octx.stroke();
       
@@ -516,14 +532,14 @@ function onResults(res){
       updatePinch(false);setMode('CURSOR','#ffdd44');
       octx.beginPath();octx.arc(ix,iy,12,0,Math.PI*2);octx.strokeStyle='#ffdd44';octx.lineWidth=2;octx.stroke();
       octx.beginPath();octx.arc(ix,iy,3,0,Math.PI*2);octx.fillStyle='#ffdd44';octx.fill();
-      prevPt=null;finishStroke();
+      prevPt=null;finishStroke();isDragging=false;
 
     }else{
       if(inMenu){inMenu=false;dwellTarget=null;}
-      updatePinch(false);setMode('IDLE','#888');prevPt=null;finishStroke();
+      updatePinch(false);setMode('IDLE','#888');prevPt=null;finishStroke();isDragging=false;
     }
   }else{
-    prevPt=null;smoothPt=null;updatePinch(false);finishStroke();setMode('IDLE','#888');
+    prevPt=null;smoothPt=null;updatePinch(false);finishStroke();setMode('IDLE','#888');isDragging=false;
     if(inMenu){inMenu=false;dwellTarget=null;}
   }
 }
