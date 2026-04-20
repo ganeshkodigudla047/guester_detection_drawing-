@@ -34,7 +34,7 @@ let mCand='IDLE', mStreak=0, aMode='IDLE';
 let wasDrawing=false;
 let zInitD=0;
 let inZoom=false;
-let tapActive=false, tapStart=0, tapCount=0, lastTapEnd=0, lastAction=0;
+let swipeStart=null, lastAction=0;
 let moveAnchor=null;
 let isDragging=false, dragAnchor=null;
 let lastPalmDist=Infinity;
@@ -207,24 +207,37 @@ function findNearestStroke(x, y) {
   let bestDist = Infinity;
   let best = null;
   const THRESH = 60; // Max distance to select
+  
   strokes.forEach(s => {
-    let pts = s.points;
-    if(s.type === 'shape') {
-      if(s.shape === 'LINE') pts = s.sm;
-      else if(s.shape === 'CIRCLE' || s.shape === 'RECTANGLE' || s.shape === 'SQUARE') {
-        pts = [{x: s.x0, y: s.y0}, {x: s.x0+s.w, y: s.y0}, {x: s.x0, y: s.y0+s.h}, {x: s.x0+s.w, y: s.y0+s.h}, {x: s.x0+s.w/2, y: s.y0+s.h/2}];
+    if (s.type === 'shape' && (s.shape === 'CIRCLE' || s.shape === 'RECTANGLE' || s.shape === 'SQUARE')) {
+      let dist = Infinity;
+      if (x >= s.x0 && x <= s.x0 + s.w && y >= s.y0 && y <= s.y0 + s.h) {
+         dist = 0; // Inside the bounding box
       } else {
-        pts = s.ap;
+         const dx = Math.max(s.x0 - x, 0, x - (s.x0 + s.w));
+         const dy = Math.max(s.y0 - y, 0, y - (s.y0 + s.h));
+         dist = Math.sqrt(dx*dx + dy*dy);
       }
-    }
-    if(pts) {
-      pts.forEach(p => {
-        const d = dst({x,y}, p);
-        if(d < bestDist && d < THRESH) {
-          bestDist = d;
-          best = s;
-        }
-      });
+      
+      if (dist < bestDist && dist < THRESH) {
+         bestDist = dist;
+         best = s;
+      }
+    } else {
+      let pts = s.points;
+      if(s.type === 'shape') {
+        if(s.shape === 'LINE') pts = s.sm;
+        else pts = s.ap;
+      }
+      if(pts) {
+        pts.forEach(p => {
+          const d = dst({x,y}, p);
+          if(d < bestDist && d < THRESH) {
+            bestDist = d;
+            best = s;
+          }
+        });
+      }
     }
   });
   return best;
@@ -271,24 +284,7 @@ function debounce(raw){
   return aMode;
 }
 
-// Index+Middle tap/hold for Undo/Redo
-function updateUndoRedo(p){
-  const now=performance.now()/1000;
-  if(p&&!tapActive){
-    tapActive=true;tapStart=now;
-  }
-  else if(!p&&tapActive){
-    const dur=now-tapStart;tapActive=false;
-    if(dur<TAP_MAX){
-      if(tapCount===1&&now-lastTapEnd<DBL_SECS){if(now-lastAction>=COOLDOWN){doRedo();lastAction=now;}tapCount=0;}
-      else{tapCount=1;lastTapEnd=now;}
-    }
-  }
-  if(!p&&tapCount===1&&performance.now()/1000-lastTapEnd>=DBL_SECS){
-    if(performance.now()/1000-lastAction>=COOLDOWN){doUndo();lastAction=performance.now()/1000;}
-    tapCount=0;
-  }
-}
+// Swipe tracking variables added to state
 
 // Shape detection
 function detectShape(pts){
@@ -438,7 +434,6 @@ function onResults(res){
     skeleton(lms);
 
     const fist = isFist(lms);
-    updateUndoRedo(fist);
 
     if(mode==='ERASE'){
       const pp=[0,4,8,12,16,20].map(i=>lm(lms,i));
@@ -532,7 +527,30 @@ function onResults(res){
 
     }else if(mode==='CURSOR'){
       if(inMenu){inMenu=false;dwellTarget=null;}
-      setMode('CURSOR','#ffdd44');
+      setMode('CURSOR (Swipe ✌️ L/R)','#ffdd44');
+      
+      const nowTime = performance.now();
+      if (!swipeStart) {
+        swipeStart = {x: ix, y: iy, time: nowTime};
+      } else {
+        const dx = ix - swipeStart.x;
+        const dy = iy - swipeStart.y;
+        const dt = nowTime - swipeStart.time;
+        if (dt > 400) {
+           swipeStart = {x: ix, y: iy, time: nowTime};
+        } else if (Math.abs(dx) > 120 && Math.abs(dy) < 80 && nowTime - lastAction > 800) {
+           if (dx < 0) {
+             doUndo();
+             lastAction = nowTime;
+             swipeStart = null;
+           } else {
+             doRedo();
+             lastAction = nowTime;
+             swipeStart = null;
+           }
+        }
+      }
+      
       octx.beginPath();octx.arc(ix,iy,12,0,Math.PI*2);octx.strokeStyle='#ffdd44';octx.lineWidth=2;octx.stroke();
       octx.beginPath();octx.arc(ix,iy,3,0,Math.PI*2);octx.fillStyle='#ffdd44';octx.fill();
       prevPt=null;finishStroke();isDragging=false;
@@ -562,8 +580,8 @@ async function start(){
     const cam=new Camera(video,{onFrame:async()=>{syncSize();await hands.send({image:video});},width:1280,height:720});
     cam.start();
     const track=stream.getVideoTracks()[0];
-    statusEl.textContent='Camera: '+(track?track.label:'ready')+' — raise index finger to draw!';
-    setTimeout(()=>statusEl.classList.add('hidden'),4000);
+    statusEl.textContent='Camera: '+(track?track.label:'ready')+' — raise index finger to draw! Swipe ✌️ L/R to Undo/Redo.';
+    setTimeout(()=>statusEl.classList.add('hidden'),6000);
   }catch(e){statusEl.textContent='Camera error: '+e.message;statusEl.style.color='#f55';console.error(e);}
 }
 start();
