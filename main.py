@@ -1019,69 +1019,126 @@ class TwoFingerTapDetector:
 
 
 # ─────────────────────────────────────────────
-# ClapDetector
-# Detects a clap gesture using TWO hands:
-# both wrists come within CLAP_THRESHOLD px
-# of each other, then separate.
-# Triggers CLEAR on the clap release.
 # ─────────────────────────────────────────────
-CLAP_THRESHOLD  = 200   # px — max wrist-to-wrist distance to count as clap
-CLAP_COOLDOWN   = 1.5   # seconds between clap triggers
+# ClapDetector
+# Detects a clap using the classic fast-approach
+# pattern: hands far apart → suddenly very close.
+#
+# Logic (per spec):
+#   prev_distance > CLAP_HIGH  AND
+#   curr_distance < CLAP_LOW   AND
+#   transition happens within CLAP_FRAMES frames
+# → clap_detected = True → CLEAR canvas
+# ─────────────────────────────────────────────
+CLAP_HIGH     = 150   # px — hands must have been this far apart before clap
+CLAP_LOW      = 60    # px — hands must come this close to trigger clap
+CLAP_FRAMES   = 8     # max frames the approach must happen within
+CLAP_COOLDOWN = 1.5   # seconds between clap triggers
+
+
+def detect_two_hands(lms_list):
+    """Return True when exactly two hands are detected."""
+    return len(lms_list) == 2
+
+
+def calculate_hand_distance(lms0, lms1, fw, fh):
+    """
+    Compute horizontal distance between wrist (landmark 0) of two hands.
+    Returns absolute pixel distance.
+    """
+    w0 = lm_px(lms0, 0, fw, fh)
+    w1 = lm_px(lms1, 0, fw, fh)
+    return abs(w0[0] - w1[0])
+
+
+def detect_clap(prev_distance, current_distance):
+    """
+    Return True when hands snapped together quickly.
+    prev_distance > CLAP_HIGH and current_distance < CLAP_LOW.
+    """
+    return prev_distance > CLAP_HIGH and current_distance < CLAP_LOW
+
+
+def clear_canvas(canvas):
+    """Wipe the entire drawing canvas to black."""
+    canvas[:] = 0
+    return canvas
+
 
 class ClapDetector:
     """
-    Detects a two-hand clap (both wrists close together then apart).
-    Returns 'CLEAR' on the release frame.
+    Stateful clap detector.
+
+    Tracks the last N frames of hand distance.
+    Fires 'CLEAR' when the fast-approach pattern is detected:
+      - Any of the last CLAP_FRAMES distances was > CLAP_HIGH
+      - Current distance < CLAP_LOW
+      - Cooldown has elapsed
     """
     def __init__(self):
-        self._clapping    = False
-        self._last_clap   = 0.0
+        self._dist_history  = collections.deque(maxlen=CLAP_FRAMES)
+        self._last_clap     = 0.0
+        self._was_two_hands = False   # track 2→1 merge as fallback
         self.action_label       = ""
         self._action_label_time = 0.0
 
     def update(self, lms_list, fw, fh):
         """
+        Call every frame.
+
         Parameters
         ----------
-        lms_list : list of landmark lists (1 or 2 hands)
+        lms_list : list of landmark lists (pass [] for no hands, [lms] for 1)
         fw, fh   : frame width / height
 
         Returns
         -------
-        'CLEAR' on clap release, else None
+        'CLEAR' if clap detected, else None
         """
         now    = time.time()
         action = None
 
+        # Clear label after timeout
         if self.action_label and now - self._action_label_time > ACTION_LABEL_SECS:
             self.action_label = ""
 
-        if len(lms_list) < 2:
-            # Went from 2 hands to 1 — could be a clap merge
-            if self._clapping:
-                self._clapping = False
-                if now - self._last_clap >= CLAP_COOLDOWN:
-                    action = "CLEAR"
-                    self._last_clap = now
-                    self._set_label("CLAP! CLEARED")
-            return action
+        n = len(lms_list)
 
-        # Use wrist (landmark 0) of each hand
-        w0 = lm_px(lms_list[0], 0, fw, fh)
-        w1 = lm_px(lms_list[1], 0, fw, fh)
-        d  = float(np.hypot(w0[0] - w1[0], w0[1] - w1[1]))
+        # ── Two hands visible ─────────────────────────────────
+        if n == 2:
+            d = calculate_hand_distance(lms_list[0], lms_list[1], fw, fh)
+            self._dist_history.append(d)
+            self._was_two_hands = True
 
-        if d < CLAP_THRESHOLD and not self._clapping:
-            # Hands came together
-            self._clapping = True
+            # Check clap: current distance very small AND
+            # at least one recent distance was large
+            if d < CLAP_LOW and len(self._dist_history) >= 2:
+                max_recent = max(self._dist_history)
+                if detect_clap(max_recent, d):
+                    if now - self._last_clap >= CLAP_COOLDOWN:
+                        action = "CLEAR"
+                        self._last_clap = now
+                        self._set_label("CLAP! CANVAS CLEARED")
+                        self._dist_history.clear()
 
-        elif d >= CLAP_THRESHOLD and self._clapping:
-            # Hands separated after being close — clap complete
-            self._clapping = False
-            if now - self._last_clap >= CLAP_COOLDOWN:
-                action = "CLEAR"
-                self._last_clap = now
-                self._set_label("CLAP! CLEARED")
+        # ── Went from 2 hands to 1 (merge = clap moment) ─────
+        elif n == 1 and self._was_two_hands:
+            self._was_two_hands = False
+            # If last known distances show a fast approach, fire clap
+            if len(self._dist_history) >= 2:
+                max_recent = max(self._dist_history)
+                last_d     = self._dist_history[-1]
+                if detect_clap(max_recent, last_d):
+                    if now - self._last_clap >= CLAP_COOLDOWN:
+                        action = "CLEAR"
+                        self._last_clap = now
+                        self._set_label("CLAP! CANVAS CLEARED")
+            self._dist_history.clear()
+
+        # ── No hands ─────────────────────────────────────────
+        else:
+            self._was_two_hands = False
+            self._dist_history.clear()
 
         return action
 
@@ -1090,9 +1147,10 @@ class ClapDetector:
         self._action_label_time = time.time()
 
     def reset(self):
-        self._clapping  = False
-        self._last_clap = 0.0
-        self.action_label = ""
+        self._dist_history.clear()
+        self._last_clap     = 0.0
+        self._was_two_hands = False
+        self.action_label   = ""
 
 
 # ─────────────────────────────────────────────
@@ -1825,7 +1883,7 @@ def main():
             # Clap detection (runs every frame with two hands)
             clap_action = clap_detector.update(lms_list, fw, fh)
             if clap_action == "CLEAR":
-                base_canvas[:] = 0
+                clear_canvas(base_canvas)
                 strokes_3d     = []
                 current_stroke = None
                 z_history.clear()
@@ -1841,6 +1899,15 @@ def main():
                 pan_prev_wrist_x = None
                 pan_smooth_dx    = 0.0
                 print("[INFO] Canvas cleared by CLAP gesture.")
+            else:
+                # Show live hand distance as clap guide (only when not zooming)
+                if not (pinch0 and pinch1):
+                    _d = calculate_hand_distance(lms_list[0], lms_list[1], fw, fh)
+                    _col = (0, 255, 100) if _d > CLAP_HIGH else (0, 100, 255)
+                    cv2.putText(frame, f"Clap dist: {int(_d)}px",
+                                (10, fh - 50),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, _col, 1,
+                                cv2.LINE_AA)
 
             if stable_two == "ZOOM":
                 mode = "ZOOM"
@@ -1879,7 +1946,7 @@ def main():
             clap_action = clap_detector.update(
                 [h.landmark for h in results.multi_hand_landmarks], fw, fh)
             if clap_action == "CLEAR":
-                base_canvas[:] = 0
+                clear_canvas(base_canvas)
                 strokes_3d     = []
                 current_stroke = None
                 z_history.clear()
@@ -2242,10 +2309,34 @@ def main():
         curr_time = time.time()
         fps = 1.0 / max(curr_time - prev_time, 1e-6)
         prev_time = curr_time
+
         # Combine action labels: pinch > two-finger > clap
         _action_lbl = (pinch_detector.action_label or
                        two_finger_detector.action_label or
                        clap_detector.action_label)
+
+        # ── Clap visual flash ─────────────────────────────────────────────
+        # Show a bright full-screen overlay for 0.4s after a clap
+        if clap_detector.action_label:
+            _flash_age = time.time() - clap_detector._action_label_time
+            if _flash_age < 0.4:
+                _alpha = max(0.0, 0.5 * (1.0 - _flash_age / 0.4))
+                _overlay = frame.copy()
+                cv2.rectangle(_overlay, (0, 0), (fw, fh), (0, 255, 120), -1)
+                cv2.addWeighted(_overlay, _alpha, frame, 1 - _alpha, 0, frame)
+            # Large centred text
+            _txt = "CLAP DETECTED - CANVAS CLEARED"
+            (_tw, _th), _ = cv2.getTextSize(
+                _txt, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)
+            cv2.rectangle(frame,
+                          (fw // 2 - _tw // 2 - 16, fh // 2 - _th - 16),
+                          (fw // 2 + _tw // 2 + 16, fh // 2 + 16),
+                          (0, 60, 0), -1)
+            cv2.putText(frame, _txt,
+                        (fw // 2 - _tw // 2, fh // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+                        (0, 255, 120), 3, cv2.LINE_AA)
+
         frame = draw_ui(frame, current_color_idx, current_brush_idx,
                         mode, fps, scale_factor,
                         shape_label=shape_detector.label,
