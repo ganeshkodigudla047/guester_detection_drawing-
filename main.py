@@ -2,11 +2,13 @@
 Real-Time Hand Gesture Drawing Application  — with Depth-Based 3D Drawing
 ==========================================================================
 Uses OpenCV + MediaPipe + MiDaS (PyTorch) for AR-style 3D air drawing.
+New: YOLOv8 object detection + Blueprint Mode + Canvas Pan gesture.
 
 Gestures (single hand):
   - Index finger only     → DRAW MODE
   - Index + Middle        → CURSOR MODE
-  - Full Palm (5 fingers) → ERASER MODE
+  - Full Palm stationary  → ERASER MODE
+  - Full Palm moving      → PAN MODE (slides canvas horizontally)
   - Pinch (thumb+index)   → MOVE MODE
 
 Gestures (two hands):
@@ -15,16 +17,10 @@ Gestures (two hands):
 Controls:
   - 'c' → Clear canvas + 3D strokes
   - 's' → Save drawing as PNG
+  - 'o' → Toggle object detection (YOLOv8)
+  - 'b' → Toggle blueprint mode (requires object detection ON)
   - 'd' → Toggle DEPTH / 3D mode on/off
   - 'q' → Quit
-
-3D Drawing Pipeline (when depth mode ON):
-  1. MiDaS estimates per-pixel depth each frame
-  2. Fingertip (x,y) → 3D point (X,Y,Z) via camera intrinsics
-  3. ORB + optical flow tracks camera motion between frames
-  4. 3D strokes are kept in world space; camera transform is applied
-  5. World points re-projected to screen for rendering
-  6. Perspective scaling: far strokes appear thinner/darker
 """
 
 import cv2
@@ -42,6 +38,15 @@ except ImportError:
     TORCH_AVAILABLE = False
     print("[WARN] PyTorch not found — depth mode disabled. "
           "Install with: pip install torch torchvision")
+
+# ── YOLOv8 (imported lazily — app runs without it) ────────────────────────
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
+    print("[WARN] ultralytics not found — object detection disabled. "
+          "Install with: pip install ultralytics")
 
 # ─────────────────────────────────────────────
 # Configuration Constants
@@ -76,6 +81,18 @@ SHAPE_MIN_POINTS   = 20    # ignore strokes with fewer collected points
 SHAPE_MIN_AREA     = 800   # ignore shapes whose bounding area is too small (px²)
 SHAPE_LABEL_SECS   = 2.5   # seconds to display the detected shape name on screen
 SHAPE_POLY_EPSILON = 0.03  # approxPolyDP epsilon as fraction of perimeter
+
+# ── Object Detection + Blueprint Mode ────────────────────────────────────
+YOLO_MODEL_NAME    = "yolov8n.pt"   # nano = fastest; swap for yolov8s.pt etc.
+YOLO_CONF          = 0.45           # minimum detection confidence
+YOLO_INPUT_SIZE    = 416            # resize frame to this before YOLO inference
+BLUEPRINT_GRID_GAP = 40             # pixels between blueprint grid lines
+BLUEPRINT_BG       = (30, 10, 0)    # dark navy background (BGR)
+BLUEPRINT_EDGE_CLR = (255, 220, 80) # cyan-white edge colour (BGR)
+
+# ── Canvas Pan ────────────────────────────────────────────────────────────
+PAN_THRESHOLD      = 15    # px — minimum wrist movement to trigger pan
+PAN_SMOOTH         = 0.4   # EMA smoothing for pan dx (0=instant, 1=frozen)
 
 # ── 3D / Depth drawing ────────────────────────────────────────────────────
 # Approximate camera intrinsics for a typical 1280×720 webcam.
@@ -1271,6 +1288,278 @@ def check_ui_click(ix, iy, current_color_idx, current_brush_idx):
 
     return current_color_idx, current_brush_idx
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ██  FEATURE 1 — OBJECT DETECTION + BLUEPRINT MODE
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────
+# ObjectDetector
+# Wraps YOLOv8 nano for real-time detection.
+# Loads lazily on first call to enable().
+# ─────────────────────────────────────────────
+class ObjectDetector:
+    """
+    Thin wrapper around YOLOv8 for real-time object detection.
+    Falls back gracefully if ultralytics is not installed.
+    """
+    def __init__(self):
+        self._model   = None
+        self._ready   = False
+        self._enabled = False
+
+    def enable(self):
+        """Load the YOLO model (downloads ~6 MB on first run)."""
+        if not YOLO_AVAILABLE:
+            print("[YOLO] ultralytics not installed — object detection unavailable.")
+            return False
+        if self._ready:
+            self._enabled = True
+            return True
+        try:
+            print(f"[YOLO] Loading {YOLO_MODEL_NAME} …")
+            self._model  = YOLO(YOLO_MODEL_NAME)
+            self._ready  = True
+            self._enabled = True
+            print("[YOLO] Model ready.")
+            return True
+        except Exception as exc:
+            print(f"[YOLO] Failed to load model: {exc}")
+            return False
+
+    def toggle(self):
+        if not self._ready:
+            return self.enable()
+        self._enabled = not self._enabled
+        print(f"[YOLO] Object detection {'ON' if self._enabled else 'OFF'}.")
+        return self._enabled
+
+    @property
+    def enabled(self):
+        return self._enabled and self._ready
+
+    def detect_objects(self, frame):
+        """
+        Run YOLOv8 inference on `frame`.
+
+        Returns
+        -------
+        list of dicts: [{'label': str, 'conf': float,
+                          'x1': int, 'y1': int, 'x2': int, 'y2': int}, ...]
+        Empty list if model not ready or no detections.
+        """
+        if not self.enabled:
+            return []
+
+        fh, fw = frame.shape[:2]
+        # Resize to YOLO_INPUT_SIZE for speed, run inference
+        scale_x = fw / YOLO_INPUT_SIZE
+        scale_y = fh / YOLO_INPUT_SIZE
+        small   = cv2.resize(frame, (YOLO_INPUT_SIZE, YOLO_INPUT_SIZE))
+
+        results = self._model(small, conf=YOLO_CONF, verbose=False)
+        detections = []
+        for r in results:
+            for box in r.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                # Scale back to original frame size
+                detections.append({
+                    'label': r.names[int(box.cls[0])],
+                    'conf' : float(box.conf[0]),
+                    'x1'   : int(x1 * scale_x),
+                    'y1'   : int(y1 * scale_y),
+                    'x2'   : int(x2 * scale_x),
+                    'y2'   : int(y2 * scale_y),
+                })
+        return detections
+
+
+def extract_roi(frame, det):
+    """
+    Extract the Region of Interest from `frame` using detection bounding box.
+
+    Parameters
+    ----------
+    frame : BGR frame
+    det   : detection dict with x1, y1, x2, y2
+
+    Returns
+    -------
+    roi   : cropped BGR image, or None if bbox is degenerate
+    """
+    fh, fw = frame.shape[:2]
+    x1 = max(0, det['x1'])
+    y1 = max(0, det['y1'])
+    x2 = min(fw, det['x2'])
+    y2 = min(fh, det['y2'])
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return frame[y1:y2, x1:x2].copy()
+
+
+def apply_blueprint_effect(roi):
+    """
+    Convert an ROI into an engineering blueprint style image.
+
+    Pipeline:
+      1. Dark navy background
+      2. Grayscale → Gaussian blur → Canny edges
+      3. Dilate edges slightly for visibility
+      4. Draw engineering grid lines
+      5. Overlay cyan-white edges on dark background
+
+    Parameters
+    ----------
+    roi : BGR image (the object region)
+
+    Returns
+    -------
+    blueprint : BGR image, same size as roi
+    """
+    h, w = roi.shape[:2]
+
+    # ── 1. Dark background ────────────────────────────────────
+    blueprint = np.full((h, w, 3), BLUEPRINT_BG, dtype=np.uint8)
+
+    # ── 2. Edge detection ─────────────────────────────────────
+    gray    = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges   = cv2.Canny(blurred, 40, 120)
+
+    # Dilate edges slightly so they're visible at small sizes
+    kernel = np.ones((2, 2), np.uint8)
+    edges  = cv2.dilate(edges, kernel, iterations=1)
+
+    # ── 3. Colour the edges ───────────────────────────────────
+    edge_layer = np.zeros((h, w, 3), dtype=np.uint8)
+    edge_layer[edges > 0] = BLUEPRINT_EDGE_CLR
+
+    # ── 4. Engineering grid lines ─────────────────────────────
+    grid_color = (60, 30, 10)   # subtle dark-blue grid (BGR)
+    for gx in range(0, w, BLUEPRINT_GRID_GAP):
+        cv2.line(blueprint, (gx, 0), (gx, h), grid_color, 1)
+    for gy in range(0, h, BLUEPRINT_GRID_GAP):
+        cv2.line(blueprint, (0, gy), (w, gy), grid_color, 1)
+
+    # ── 5. Composite edges over background ────────────────────
+    mask     = edges > 0
+    blueprint[mask] = edge_layer[mask]
+
+    return blueprint
+
+
+def overlay_blueprint(frame, blueprint, det):
+    """
+    Replace the detection bounding-box region in `frame` with `blueprint`.
+    Draws a cyan bounding box and label on top.
+
+    Parameters
+    ----------
+    frame     : BGR frame (modified in-place)
+    blueprint : BGR blueprint image (same size as ROI)
+    det       : detection dict
+
+    Returns
+    -------
+    frame     : modified frame
+    """
+    fh, fw = frame.shape[:2]
+    x1 = max(0, det['x1'])
+    y1 = max(0, det['y1'])
+    x2 = min(fw, det['x2'])
+    y2 = min(fh, det['y2'])
+    bh, bw = blueprint.shape[:2]
+
+    # Resize blueprint to match actual (clamped) bbox size
+    roi_w = x2 - x1
+    roi_h = y2 - y1
+    if roi_w < 2 or roi_h < 2:
+        return frame
+    if bw != roi_w or bh != roi_h:
+        blueprint = cv2.resize(blueprint, (roi_w, roi_h))
+
+    frame[y1:y2, x1:x2] = blueprint
+
+    # Bounding box + label
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 200, 0), 2)
+    label_txt = f"{det['label']} {det['conf']:.0%}"
+    (tw, th), _ = cv2.getTextSize(label_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+    cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 6, y1), (255, 200, 0), -1)
+    cv2.putText(frame, label_txt, (x1 + 3, y1 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+    return frame
+
+
+def draw_detections(frame, detections):
+    """
+    Draw plain bounding boxes + labels when blueprint mode is OFF.
+    """
+    for det in detections:
+        cv2.rectangle(frame,
+                      (det['x1'], det['y1']),
+                      (det['x2'], det['y2']),
+                      (0, 200, 255), 2)
+        label_txt = f"{det['label']} {det['conf']:.0%}"
+        cv2.putText(frame, label_txt,
+                    (det['x1'] + 3, det['y1'] - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (0, 200, 255), 1, cv2.LINE_AA)
+    return frame
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ██  FEATURE 2 — CANVAS PAN (OPEN PALM SLIDE)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def detect_open_palm(fingers):
+    """
+    Return True when all five fingers are extended (open palm).
+    `fingers` is the [thumb, index, middle, ring, pinky] bool list
+    from detect_fingers().
+    """
+    return all(fingers)
+
+
+def calculate_dx(prev_x, curr_x, smooth_dx):
+    """
+    Compute smoothed horizontal delta between two wrist positions.
+
+    Parameters
+    ----------
+    prev_x    : previous wrist x (pixels)
+    curr_x    : current  wrist x (pixels)
+    smooth_dx : previous smoothed dx value
+
+    Returns
+    -------
+    (raw_dx, new_smooth_dx)
+    """
+    raw_dx    = curr_x - prev_x
+    new_smooth = smooth_dx * PAN_SMOOTH + raw_dx * (1.0 - PAN_SMOOTH)
+    return raw_dx, new_smooth
+
+
+def shift_canvas(canvas, dx):
+    """
+    Shift the entire drawing canvas horizontally by `dx` pixels.
+    Uses affine warp so empty areas are filled with black.
+
+    Parameters
+    ----------
+    canvas : base_canvas ndarray (modified in-place)
+    dx     : integer pixel shift (positive = right, negative = left)
+
+    Returns
+    -------
+    shifted canvas (same shape)
+    """
+    h, w = canvas.shape[:2]
+    M       = np.float32([[1, 0, dx], [0, 1, 0]])
+    shifted = cv2.warpAffine(canvas, M, (w, h),
+                             borderMode=cv2.BORDER_CONSTANT,
+                             borderValue=(0, 0, 0))
+    return shifted
+
+
 # ─────────────────────────────────────────────
 # Main Application Loop
 # ─────────────────────────────────────────────
@@ -1318,6 +1607,15 @@ def main():
     pinch_detector   = PinchActionDetector()   # tap/hold → UNDO/REDO/MOVE
     undo_manager     = UndoRedoManager()       # canvas + 3D stroke history
 
+    # ── Feature 1: Object detection + Blueprint ───────────────────────────
+    obj_detector   = ObjectDetector()
+    blueprint_mode = False   # 'b' toggles blueprint rendering
+    detections     = []      # last YOLO results (list of dicts)
+
+    # ── Feature 2: Canvas pan ─────────────────────────────────────────────
+    pan_prev_wrist_x = None   # wrist x from previous frame (screen px)
+    pan_smooth_dx    = 0.0    # EMA-smoothed horizontal delta
+
     prev_time = time.time()
     mode = "IDLE"
 
@@ -1325,6 +1623,8 @@ def main():
     print("  Hand Gesture Drawing App  (3D Depth Edition)")
     print("  Single hand : DRAW / ERASE / MOVE / CURSOR")
     print("  Both hands pinching : ZOOM IN / OUT")
+    print("  'o' = toggle object detection (YOLOv8)")
+    print("  'b' = toggle blueprint mode")
     print("  'd' = toggle 3D depth mode (loads MiDaS on first press)")
     print("  'c' = clear   's' = save   'q' = quit")
     print("=" * 65)
@@ -1358,6 +1658,12 @@ def main():
             raw_depth = depth_estimator.get_depth_map(frame)
             if raw_depth is not None:
                 smoothed_depth = depth_smoother.update(raw_depth)
+
+        # ── Feature 1: Object detection (YOLOv8) ─────────────────────────
+        if obj_detector.enabled:
+            detections = obj_detector.detect_objects(frame)
+        else:
+            detections = []
 
         # ── MediaPipe hand detection ──────────────────────────────────────
         rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -1450,20 +1756,45 @@ def main():
             # ── ERASE ─────────────────────────────────────────
             if mode == "ERASE":
                 _draw_cx, _draw_cy = 0, 0
-                pinch_detector.update(False)   # not pinching
-                palm_pts = [lm_px(landmarks, i, fw, fh)
-                            for i in [0, 4, 8, 12, 16, 20]]
-                pcx = int(np.mean([p[0] for p in palm_pts]))
-                pcy = int(np.mean([p[1] for p in palm_pts]))
-                ccx, ccy = screen_to_canvas(
-                    pcx, pcy, fw, fh, cw, ch,
-                    offset_x, offset_y, scale_factor)
-                er = max(1, int(ERASER_RADIUS / scale_factor))
-                cv2.circle(base_canvas, (ccx, ccy), er, (0, 0, 0), -1)
-                cv2.circle(frame, (pcx, pcy), ERASER_RADIUS, (0, 100, 255), 2)
-                cv2.putText(frame, "ERASING",
-                            (pcx - 35, pcy - ERASER_RADIUS - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2)
+                pinch_detector.update(False)
+
+                # Feature 2: Canvas Pan -- open palm moving sideways = pan
+                wrist_x = lm_px(landmarks, 0, fw, fh)[0]
+                if pan_prev_wrist_x is not None:
+                    _raw_dx, pan_smooth_dx = calculate_dx(
+                        pan_prev_wrist_x, wrist_x, pan_smooth_dx)
+                    _is_panning = abs(pan_smooth_dx) > PAN_THRESHOLD
+                else:
+                    _is_panning = False
+                pan_prev_wrist_x = wrist_x
+
+                if _is_panning:
+                    # Shift canvas horizontally
+                    base_canvas = shift_canvas(base_canvas, int(pan_smooth_dx))
+                    cv2.putText(frame, "PAN MODE",
+                                (fw // 2 - 70, fh // 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.1,
+                                (0, 255, 200), 2, cv2.LINE_AA)
+                    _arrow = ">>" if pan_smooth_dx > 0 else "<<"
+                    cv2.putText(frame, _arrow,
+                                (fw // 2 - 30, fh // 2 + 45),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.3,
+                                (0, 255, 200), 2, cv2.LINE_AA)
+                else:
+                    # Normal erase
+                    palm_pts = [lm_px(landmarks, i, fw, fh)
+                                for i in [0, 4, 8, 12, 16, 20]]
+                    pcx = int(np.mean([p[0] for p in palm_pts]))
+                    pcy = int(np.mean([p[1] for p in palm_pts]))
+                    ccx, ccy = screen_to_canvas(
+                        pcx, pcy, fw, fh, cw, ch,
+                        offset_x, offset_y, scale_factor)
+                    er = max(1, int(ERASER_RADIUS / scale_factor))
+                    cv2.circle(base_canvas, (ccx, ccy), er, (0, 0, 0), -1)
+                    cv2.circle(frame, (pcx, pcy), ERASER_RADIUS, (0, 100, 255), 2)
+                    cv2.putText(frame, "ERASING",
+                                (pcx - 35, pcy - ERASER_RADIUS - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2)
                 prev_x, prev_y = None, None
                 in_pinch = False
                 # Erase nearby 3D strokes whose projected centroid is in range
@@ -1675,6 +2006,7 @@ def main():
             single_debouncer.reset()
             zoom_debouncer.reset()
             pinch_detector.reset()
+            pan_prev_wrist_x = None   # reset pan anchor when hand leaves
             if current_stroke is not None and len(current_stroke) > 0:
                 strokes_3d.append(current_stroke)
                 undo_manager.snapshot(base_canvas, strokes_3d)
@@ -1688,6 +2020,17 @@ def main():
         # ── Render 2D canvas ──────────────────────────────────────────────
         frame = render_canvas(frame, base_canvas,
                               offset_x, offset_y, scale_factor)
+
+        # ── Feature 1: Object detection + Blueprint overlay ───────────────
+        if detections:
+            if blueprint_mode:
+                for det in detections:
+                    roi = extract_roi(frame, det)
+                    if roi is not None:
+                        bp = apply_blueprint_effect(roi)
+                        frame = overlay_blueprint(frame, bp, det)
+            else:
+                frame = draw_detections(frame, detections)
 
         # ── Render 3D strokes on top ──────────────────────────────────────
         if depth_enabled and strokes_3d:
@@ -1734,6 +2077,17 @@ def main():
             print("[INFO] Quit.")
             break
 
+        elif key == ord('o'):
+            # Toggle object detection (YOLOv8)
+            obj_detector.toggle()
+
+        elif key == ord('b'):
+            # Toggle blueprint mode (requires object detection to be ON)
+            if not obj_detector.enabled:
+                obj_detector.enable()
+            blueprint_mode = not blueprint_mode
+            print(f"[INFO] Blueprint mode {'ON' if blueprint_mode else 'OFF'}.")
+
         elif key == ord('d'):
             # Toggle depth mode; load MiDaS on first activation
             if not depth_enabled:
@@ -1762,6 +2116,8 @@ def main():
             pinch_detector.reset()
             undo_manager.reset()
             shape_detector.reset()
+            pan_prev_wrist_x = None
+            pan_smooth_dx    = 0.0
             print("[INFO] Canvas cleared.")
 
         elif key == ord('s'):
