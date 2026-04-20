@@ -1,4 +1,4 @@
-﻿/* ============================================================
+/* ============================================================
    Hand Gesture Drawing — Browser JS
    MediaPipe Hands + Canvas API
    Gestures:
@@ -30,8 +30,10 @@ const DEBOUNCE_FRAMES = 3;
 const video         = document.getElementById('webcam');
 const drawCanvas    = document.getElementById('draw-canvas');
 const overlayCanvas = document.getElementById('overlay-canvas');
+const bgCanvas      = document.getElementById('bg-canvas');
 const dctx          = drawCanvas.getContext('2d');
 const octx          = overlayCanvas.getContext('2d');
+const bgctx         = bgCanvas.getContext('2d');
 const modeLabel   = document.getElementById('mode-label');
 const fpsLabel    = document.getElementById('fps-label');
 const statusMsg   = document.getElementById('status-msg');
@@ -116,7 +118,7 @@ function syncCanvasSize() {
   const w = wrap.clientWidth;
   const h = wrap.clientHeight;
   if (w < 1 || h < 1) return;
-  [drawCanvas, overlayCanvas].forEach(c => {
+  [bgCanvas, drawCanvas, overlayCanvas].forEach(c => {
     if (c.width !== w || c.height !== h) {
       // preserve drawing content
       let saved = null;
@@ -676,26 +678,63 @@ hands.onResults(onResults);
 // ── Camera setup ─────────────────────────────────────────────
 async function startCamera() {
   try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error("Camera API not available. Make sure you are using HTTPS or localhost.");
+    }
+
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-      audio: false
+      video: { 
+        width: { ideal: 1280 }, 
+        height: { ideal: 720 },
+        facingMode: "user" 
+      }
     });
+    
+    // Log the camera name to help debug if a virtual/wrong camera is selected
+    const videoTrack = stream.getVideoTracks()[0];
+    const cameraName = videoTrack ? videoTrack.label : 'Unknown Camera';
+    console.log("Using camera:", cameraName);
+
     video.srcObject = stream;
-    await video.play();
+    
+    await new Promise((resolve) => {
+      video.onloadedmetadata = () => {
+        video.play();
+        resolve();
+      };
+    });
 
     // Sync canvas pixel size once video is playing
-    video.addEventListener('playing', syncCanvasSize);
     syncCanvasSize();
 
-    // MediaPipe Camera utility — feeds frames to hands model
-    const camera = new Camera(video, {
-      onFrame: async () => { await hands.send({ image: video }); },
-      width: 1280, height: 720
-    });
-    camera.start();
+    let lastVideoTime = -1;
+    async function processVideo() {
+      if (video.readyState >= 2) {
+        // Draw the video to the background canvas explicitly
+        bgctx.save();
+        bgctx.scale(-1, 1);
+        bgctx.translate(-bgCanvas.width, 0);
+        bgctx.drawImage(video, 0, 0, bgCanvas.width, bgCanvas.height);
+        bgctx.restore();
+      }
 
-    statusMsg.textContent = 'Camera ready — raise your index finger to draw!';
-    setTimeout(() => statusMsg.classList.add('hidden'), 3000);
+      if (video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        try {
+          await hands.send({ image: video });
+        } catch (e) {
+          statusMsg.textContent = "MediaPipe Error: " + e.message;
+          statusMsg.style.color = '#ff5555';
+          statusMsg.classList.remove('hidden');
+          console.error(e);
+        }
+      }
+      requestAnimationFrame(processVideo);
+    }
+    processVideo();
+
+    statusMsg.textContent = `Camera ready (${cameraName}) — raise your index finger to draw!`;
+    setTimeout(() => statusMsg.classList.add('hidden'), 5000);
 
   } catch (err) {
     statusMsg.textContent = `Camera error: ${err.message}`;

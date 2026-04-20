@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
@@ -42,6 +42,7 @@
   <!-- Canvas stack: video behind, canvases on top -->
   <div id="canvas-wrap">
     <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="bg-canvas"></canvas>
     <canvas id="draw-canvas"></canvas>
     <canvas id="overlay-canvas"></canvas>
   </div>
@@ -54,8 +55,6 @@
 </div>
 
 <!-- MediaPipe Hands via CDN -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 <script src="/static/js/gesture.js"></script>
 </body>
