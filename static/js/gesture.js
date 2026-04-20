@@ -4,7 +4,7 @@
 // Constants
 const PINCH_THRESH=0.06, SMOOTH=0.35, MIN_PX=6, ERASER_R=40, UNDO_MAX=30, DEBOUNCE=5;
 const BANNER_SECS=1.2, COOLDOWN=0.50, TOOLBAR_Y=80, DWELL_MS=1200, DWELL_R=40;
-const HOLD_SECS=0.5, TAP_MAX=0.30, DBL_SECS=0.40;
+const HOLD_SECS=0.5, TAP_MAX=0.40, DBL_SECS=0.50;
 const PALETTE_COLORS=['#ff0000','#00cc00','#0066ff','#ffcc00','#ffffff','#00ffff','#cc00ff'];
 const PALETTE_SIZES=[3,6,10,16];
 
@@ -34,8 +34,7 @@ let mCand='IDLE', mStreak=0, aMode='IDLE';
 let wasDrawing=false;
 let zInitD=0;
 let inZoom=false;
-let pinchActive=false, pinchStart=0, tapCount=0, lastTapEnd=0, lastAction=0;
-let pinchMoveDist=0, lastPinchPos=null;
+let tapActive=false, tapStart=0, tapCount=0, lastTapEnd=0, lastAction=0;
 let moveAnchor=null;
 let isDragging=false, dragAnchor=null;
 let lastPalmDist=Infinity;
@@ -245,8 +244,19 @@ function ringUp(lms,mg){return fingerUp(lms,16,14,13,mg);}
 function pinkyUp(lms,mg){return fingerUp(lms,20,18,17,mg);}
 function middleDown(lms){return lms[12].y>lms[10].y+0.03;}
 
+function isFist(lms){
+  const wrist=lm(lms,0), palm=lm(lms,9);
+  const palmLen=dst(wrist,palm);
+  const thresh=palmLen*1.3;
+  return dst(lm(lms,8),wrist)<thresh && 
+         dst(lm(lms,12),wrist)<thresh && 
+         dst(lm(lms,16),wrist)<thresh && 
+         dst(lm(lms,20),wrist)<thresh;
+}
+
 // Gesture classify
 function classify(lms){
+  if(isFist(lms)) return 'IDLE';
   const ix=indexUp(lms),mi=middleUp(lms),ri=ringUp(lms),pi=pinkyUp(lms),th=thumbUp(lms);
   if(th&&indexUp(lms,0.05)&&middleUp(lms,0.05)&&ringUp(lms,0.05)&&pinkyUp(lms,0.05))return'ERASE';
   if(pinching(lms)&&!mi&&!ri&&!pi)return'MOVE';
@@ -261,24 +271,15 @@ function debounce(raw){
   return aMode;
 }
 
-// Pinch tap/hold
-function updatePinch(p, mx, my){
+// Index+Middle tap/hold for Undo/Redo
+function updateUndoRedo(p){
   const now=performance.now()/1000;
-  if(p&&!pinchActive){
-    pinchActive=true;pinchStart=now;
-    pinchMoveDist=0;
-    lastPinchPos={x:mx,y:my};
+  if(p&&!tapActive){
+    tapActive=true;tapStart=now;
   }
-  else if(p&&pinchActive){
-    if(lastPinchPos){
-      pinchMoveDist+=Math.hypot(mx-lastPinchPos.x,my-lastPinchPos.y);
-      lastPinchPos={x:mx,y:my};
-    }
-  }
-  else if(!p&&pinchActive){
-    const dur=now-pinchStart;pinchActive=false;
-    // Reject tap if it moved too far (was a drag)
-    if(dur<TAP_MAX && pinchMoveDist<30){
+  else if(!p&&tapActive){
+    const dur=now-tapStart;tapActive=false;
+    if(dur<TAP_MAX){
       if(tapCount===1&&now-lastTapEnd<DBL_SECS){if(now-lastAction>=COOLDOWN){doRedo();lastAction=now;}tapCount=0;}
       else{tapCount=1;lastTapEnd=now;}
     }
@@ -436,6 +437,9 @@ function onResults(res){
     const ix=smoothPt.x,iy=smoothPt.y;
     skeleton(lms);
 
+    const fist = isFist(lms);
+    updateUndoRedo(fist);
+
     if(mode==='ERASE'){
       const pp=[0,4,8,12,16,20].map(i=>lm(lms,i));
       const ecx=pp.reduce((s,p)=>s+p.x,0)/pp.length,ecy=pp.reduce((s,p)=>s+p.y,0)/pp.length;
@@ -466,7 +470,6 @@ function onResults(res){
     }else if(mode==='MOVE'){
       const p = pinching(lms);
       const mx=(ix+tt.x)/2,my=(iy+tt.y)/2;
-      updatePinch(p, mx, my); // allow tap detector to run
       
       if (p && !isDragging) {
          isDragging = true;
@@ -502,11 +505,11 @@ function onResults(res){
       setMode('MOVE','#ffaa44');prevPt=null;finishStroke();inMenu=false;
 
     }else if(mode==='MENU'){
-      inMenu=true;updatePinch(false);drawMenu({x:ix,y:iy});setMode('MENU','#ff88ff');prevPt=null;finishStroke();isDragging=false;
+      inMenu=true;drawMenu({x:ix,y:iy});setMode('MENU','#ff88ff');prevPt=null;finishStroke();isDragging=false;
 
     }else if(mode==='DRAW'){
       if(inMenu){inMenu=false;dwellTarget=null;}
-      updatePinch(false);setMode('DRAW','#64ff96');isDragging=false;
+      setMode('DRAW','#64ff96');isDragging=false;
       
       octx.beginPath();octx.arc(ix,iy,brush/2+3,0,Math.PI*2);octx.fillStyle=color;octx.fill();octx.strokeStyle='#fff';octx.lineWidth=1;octx.stroke();
       
@@ -529,17 +532,17 @@ function onResults(res){
 
     }else if(mode==='CURSOR'){
       if(inMenu){inMenu=false;dwellTarget=null;}
-      updatePinch(false);setMode('CURSOR','#ffdd44');
+      setMode('CURSOR','#ffdd44');
       octx.beginPath();octx.arc(ix,iy,12,0,Math.PI*2);octx.strokeStyle='#ffdd44';octx.lineWidth=2;octx.stroke();
       octx.beginPath();octx.arc(ix,iy,3,0,Math.PI*2);octx.fillStyle='#ffdd44';octx.fill();
       prevPt=null;finishStroke();isDragging=false;
 
     }else{
       if(inMenu){inMenu=false;dwellTarget=null;}
-      updatePinch(false);setMode('IDLE','#888');prevPt=null;finishStroke();isDragging=false;
+      setMode('IDLE','#888');prevPt=null;finishStroke();isDragging=false;
     }
   }else{
-    prevPt=null;smoothPt=null;updatePinch(false);finishStroke();setMode('IDLE','#888');isDragging=false;
+    prevPt=null;smoothPt=null;finishStroke();setMode('IDLE','#888');isDragging=false;
     if(inMenu){inMenu=false;dwellTarget=null;}
   }
 }
