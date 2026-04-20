@@ -22,13 +22,20 @@ const banner=document.getElementById('banner');
 // State
 let color='#ff0000', brush=6;
 let smoothPt=null, prevPt=null;
+
+// OBJECT STATE
+let strokes = []; // Array of { id, type: 'stroke' | 'shape', points, color, brush, ...shapeData }
+let currentStroke = null;
+let selectedStroke = null;
+let strokeIdCounter = 0;
 const undoStack=[], redoStack=[];
+
 let mCand='IDLE', mStreak=0, aMode='IDLE';
-let strokePts=[], wasDrawing=false;
-let cvOff={x:0,y:0}, zScale=1;
-let inZoom=false, zInitD=0, zInitS=1;
-let isMoveActive=false, moveAnchor=null, moveBase={x:0,y:0};
+let wasDrawing=false;
+let zInitD=0;
+let inZoom=false;
 let pinchActive=false, pinchStart=0, tapCount=0, lastTapEnd=0, lastAction=0;
+let moveAnchor=null;
 let lastFT=performance.now(), fCount=0, bannerTmr=null;
 let inMenu=false, dwellTarget=null, dwellStart=0, dwellProg=0;
 
@@ -57,25 +64,169 @@ function syncSize(){
   if(w<1||h<1)return;
   [dc,oc].forEach(c=>{
     if(c.width!==w||c.height!==h){
-      let saved=null;
-      if(c===dc&&c.width>0&&c.height>0)saved=dctx.getImageData(0,0,c.width,c.height);
       c.width=w; c.height=h;
-      if(saved)dctx.putImageData(saved,0,0);
     }
   });
+  renderStrokes();
 }
 new ResizeObserver(syncSize).observe(document.getElementById('wrap'));
 window.addEventListener('resize',syncSize);
 
+// Deep copy for undo/redo
+function cloneStrokes(arr) {
+  return JSON.parse(JSON.stringify(arr));
+}
+
 // Undo/Redo
-function snap(){undoStack.push(dctx.getImageData(0,0,dc.width,dc.height));if(undoStack.length>UNDO_MAX)undoStack.shift();redoStack.length=0;}
-function doUndo(){if(!undoStack.length)return;redoStack.push(dctx.getImageData(0,0,dc.width,dc.height));dctx.putImageData(undoStack.pop(),0,0);flash('UNDO','undo');}
-function doRedo(){if(!redoStack.length)return;undoStack.push(dctx.getImageData(0,0,dc.width,dc.height));dctx.putImageData(redoStack.pop(),0,0);flash('REDO','redo');}
-function doClear(){snap();dctx.clearRect(0,0,dc.width,dc.height);cvOff={x:0,y:0};zScale=1;applyXform();}
+function snap(){
+  undoStack.push(cloneStrokes(strokes));
+  if(undoStack.length>UNDO_MAX)undoStack.shift();
+  redoStack.length=0;
+}
+function doUndo(){
+  if(!undoStack.length)return;
+  redoStack.push(cloneStrokes(strokes));
+  strokes=undoStack.pop();
+  selectedStroke = null;
+  renderStrokes();
+  flash('UNDO','undo');
+}
+function doRedo(){
+  if(!redoStack.length)return;
+  undoStack.push(cloneStrokes(strokes));
+  strokes=redoStack.pop();
+  selectedStroke = null;
+  renderStrokes();
+  flash('REDO','redo');
+}
+function doClear(){snap();strokes=[];selectedStroke=null;renderStrokes();}
 function doSave(){const a=document.createElement('a');a.download='drawing_'+Date.now()+'.png';a.href=dc.toDataURL();a.click();}
 function flash(txt,cls){banner.textContent=txt;banner.className='show '+cls;clearTimeout(bannerTmr);bannerTmr=setTimeout(()=>banner.className='',BANNER_SECS*1000);}
 function setMode(t,c){mlabel.textContent=t;mlabel.style.color=c;}
-function applyXform(){dc.style.transform='translate('+cvOff.x+'px,'+cvOff.y+'px) scale('+zScale+')';dc.style.transformOrigin='center center';}
+
+// Render all strokes
+function renderStrokes() {
+  dctx.clearRect(0,0,dc.width,dc.height);
+  strokes.forEach(s => {
+    dctx.strokeStyle = s.color;
+    dctx.lineWidth = s.brush;
+    dctx.lineCap = 'round';
+    dctx.lineJoin = 'round';
+    dctx.beginPath();
+    
+    if (s.type === 'shape') {
+      if(s.shape === 'LINE') {
+        dctx.moveTo(s.sm[0].x, s.sm[0].y); dctx.lineTo(s.sm[s.sm.length-1].x, s.sm[s.sm.length-1].y);
+      } else if (s.shape === 'CIRCLE') {
+        dctx.arc(s.x0+s.w/2, s.y0+s.h/2, Math.max(s.w, s.h)/2, 0, Math.PI*2);
+      } else if (s.shape === 'RECTANGLE' || s.shape === 'SQUARE') {
+        dctx.rect(s.x0, s.y0, s.w, s.h);
+      } else {
+        dctx.moveTo(s.ap[0].x, s.ap[0].y);
+        for(let i=1; i<s.ap.length; i++) dctx.lineTo(s.ap[i].x, s.ap[i].y);
+        dctx.closePath();
+      }
+    } else {
+      if (s.points && s.points.length > 0) {
+        dctx.moveTo(s.points[0].x, s.points[0].y);
+        for(let i=1; i<s.points.length; i++) dctx.lineTo(s.points[i].x, s.points[i].y);
+      }
+    }
+    dctx.stroke();
+
+    // Selection highlight
+    if (selectedStroke && selectedStroke.id === s.id) {
+       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+       if (s.type === 'shape' && (s.shape === 'CIRCLE' || s.shape === 'RECTANGLE' || s.shape === 'SQUARE')) {
+         minX = s.x0; minY = s.y0; maxX = s.x0 + s.w; maxY = s.y0 + s.h;
+       } else {
+         const pts = s.type === 'shape' ? s.ap : s.points;
+         if(pts && pts.length){
+           for(const p of pts){
+             if(p.x < minX) minX = p.x;
+             if(p.x > maxX) maxX = p.x;
+             if(p.y < minY) minY = p.y;
+             if(p.y > maxY) maxY = p.y;
+           }
+         }
+       }
+       dctx.save();
+       dctx.strokeStyle = '#00ddff';
+       dctx.lineWidth = 2;
+       dctx.setLineDash([5, 5]);
+       const pad = s.brush / 2 + 4;
+       dctx.strokeRect(minX - pad, minY - pad, (maxX - minX) + pad*2, (maxY - minY) + pad*2);
+       dctx.restore();
+    }
+  });
+}
+
+// Vector math
+function moveStroke(s, dx, dy) {
+  if(s.points) s.points.forEach(p => { p.x += dx; p.y += dy; });
+  if(s.sm) s.sm.forEach(p => { p.x += dx; p.y += dy; });
+  if(s.ap) s.ap.forEach(p => { p.x += dx; p.y += dy; });
+  if(s.x0 !== undefined) s.x0 += dx;
+  if(s.y0 !== undefined) s.y0 += dy;
+}
+
+function scaleStroke(s, scale, cx, cy) {
+  const sc = (p) => { p.x = cx + (p.x - cx)*scale; p.y = cy + (p.y - cy)*scale; };
+  if(s.points) s.points.forEach(sc);
+  if(s.sm) s.sm.forEach(sc);
+  if(s.ap) s.ap.forEach(sc);
+  if(s.x0 !== undefined) {
+    s.x0 = cx + (s.x0 - cx)*scale;
+    s.y0 = cy + (s.y0 - cy)*scale;
+    s.w *= scale;
+    s.h *= scale;
+  }
+}
+
+function getStrokeCenter(s) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const pts = s.points || s.ap || s.sm;
+  if (s.type === 'shape' && (s.shape === 'CIRCLE' || s.shape === 'RECTANGLE' || s.shape === 'SQUARE')) {
+    return {x: s.x0 + s.w/2, y: s.y0 + s.h/2};
+  }
+  if (pts && pts.length) {
+    for(const p of pts) {
+      if(p.x < minX) minX = p.x;
+      if(p.x > maxX) maxX = p.x;
+      if(p.y < minY) minY = p.y;
+      if(p.y > maxY) maxY = p.y;
+    }
+    return {x: (minX+maxX)/2, y: (minY+maxY)/2};
+  }
+  return {x:0, y:0};
+}
+
+function findNearestStroke(x, y) {
+  let bestDist = Infinity;
+  let best = null;
+  const THRESH = 60; // Max distance to select
+  strokes.forEach(s => {
+    let pts = s.points;
+    if(s.type === 'shape') {
+      if(s.shape === 'LINE') pts = s.sm;
+      else if(s.shape === 'CIRCLE' || s.shape === 'RECTANGLE' || s.shape === 'SQUARE') {
+        pts = [{x: s.x0, y: s.y0}, {x: s.x0+s.w, y: s.y0}, {x: s.x0, y: s.y0+s.h}, {x: s.x0+s.w, y: s.y0+s.h}, {x: s.x0+s.w/2, y: s.y0+s.h/2}];
+      } else {
+        pts = s.ap;
+      }
+    }
+    if(pts) {
+      pts.forEach(p => {
+        const d = dst({x,y}, p);
+        if(d < bestDist && d < THRESH) {
+          bestDist = d;
+          best = s;
+        }
+      });
+    }
+  });
+  return best;
+}
 
 // Landmark helpers
 function lm(lms,i){return{x:(1-lms[i].x)*oc.width,y:lms[i].y*oc.height};}
@@ -111,11 +262,9 @@ function debounce(raw){
 function updatePinch(p){
   const now=performance.now()/1000;
   if(p&&!pinchActive){pinchActive=true;pinchStart=now;}
-  else if(p&&pinchActive){if(now-pinchStart>=HOLD_SECS&&!isMoveActive){isMoveActive=true;tapCount=0;flash('MOVE MODE','move');}}
   else if(!p&&pinchActive){
     const dur=now-pinchStart;pinchActive=false;
-    if(isMoveActive){isMoveActive=false;moveAnchor=null;}
-    else if(dur<TAP_MAX){
+    if(dur<TAP_MAX){
       if(tapCount===1&&now-lastTapEnd<DBL_SECS){if(now-lastAction>=COOLDOWN){doRedo();lastAction=now;}tapCount=0;}
       else{tapCount=1;lastTapEnd=now;}
     }
@@ -152,18 +301,20 @@ function dp(pts,eps){
   return[pts[0],pts[pts.length-1]];
 }
 function pld(p,a,b){const dx=b.x-a.x,dy=b.y-a.y;if(!dx&&!dy)return dst(p,a);const t=((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy);return dst(p,{x:a.x+t*dx,y:a.y+t*dy});}
-function drawShape(r){
-  const{shape,ap,x0,y0,w,h,sm}=r;
-  dctx.strokeStyle=color;dctx.lineWidth=brush;dctx.lineCap='round';dctx.lineJoin='round';
-  dctx.clearRect(x0-brush-8,y0-brush-8,w+brush*2+16,h+brush*2+16);
-  dctx.beginPath();
-  if(shape==='LINE'){dctx.moveTo(sm[0].x,sm[0].y);dctx.lineTo(sm[sm.length-1].x,sm[sm.length-1].y);}
-  else if(shape==='CIRCLE'){dctx.arc(x0+w/2,y0+h/2,Math.max(w,h)/2,0,Math.PI*2);}
-  else if(shape==='RECTANGLE'||shape==='SQUARE'){dctx.rect(x0,y0,w,h);}
-  else{dctx.moveTo(ap[0].x,ap[0].y);for(let i=1;i<ap.length;i++)dctx.lineTo(ap[i].x,ap[i].y);dctx.closePath();}
-  dctx.stroke();flash(shape,'shape');
+
+function finishStroke(){
+  if(wasDrawing && currentStroke && currentStroke.points.length>=20){
+    const r=detectShape(currentStroke.points);
+    if(r){
+      currentStroke.type = 'shape';
+      Object.assign(currentStroke, r);
+      flash(r.shape,'shape');
+    }
+  }
+  wasDrawing=false;
+  currentStroke = null;
+  renderStrokes();
 }
-function finishStroke(){if(wasDrawing&&strokePts.length>=20){const r=detectShape(strokePts);if(r)drawShape(r);}wasDrawing=false;strokePts=[];}
 
 // Skeleton
 const CONN=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
@@ -234,13 +385,28 @@ function onResults(res){
       const t0=lm(hs[0],4),i0=lm(hs[0],8),t1=lm(hs[1],4),i1=lm(hs[1],8);
       const m0={x:(t0.x+i0.x)/2,y:(t0.y+i0.y)/2},m1={x:(t1.x+i1.x)/2,y:(t1.y+i1.y)/2};
       const cd=dst(m0,m1);
-      if(!inZoom){inZoom=true;zInitD=cd;zInitS=zScale;}
-      zScale=Math.max(0.5,Math.min(3,zScale*.8+(zInitS*cd/zInitD)*.2));applyXform();
+      
+      if(!inZoom){
+        inZoom=true;zInitD=cd;
+        if (!selectedStroke) selectedStroke = findNearestStroke((m0.x+m1.x)/2, (m0.y+m1.y)/2);
+      }
+      
+      if (selectedStroke && zInitD > 0) {
+        const scale = cd / zInitD;
+        const center = getStrokeCenter(selectedStroke);
+        scaleStroke(selectedStroke, scale, center.x, center.y);
+        renderStrokes();
+        zInitD = cd;
+      }
+      
       octx.strokeStyle='#00ddff';octx.lineWidth=2;octx.beginPath();octx.moveTo(m0.x,m0.y);octx.lineTo(m1.x,m1.y);octx.stroke();
       [m0,m1].forEach(p=>{octx.beginPath();octx.arc(p.x,p.y,10,0,Math.PI*2);octx.fillStyle='#00ddff';octx.fill();});
-      octx.fillStyle='#00ddff';octx.font='bold 18px sans-serif';octx.fillText('Zoom '+Math.round(zScale*100)+'%',(m0.x+m1.x)/2-40,(m0.y+m1.y)/2-16);
+      octx.fillStyle='#00ddff';octx.font='bold 18px sans-serif';octx.fillText('Zoom', (m0.x+m1.x)/2-20,(m0.y+m1.y)/2-16);
       setMode('ZOOM','#00ddff');
-    }else inZoom=false;
+    }else {
+      if(inZoom) snap(); // state change
+      inZoom=false;
+    }
     prevPt=null;smoothPt=null;return;
   }
   inZoom=false;
@@ -257,17 +423,64 @@ function onResults(res){
     if(mode==='ERASE'){
       const pp=[0,4,8,12,16,20].map(i=>lm(lms,i));
       const ecx=pp.reduce((s,p)=>s+p.x,0)/pp.length,ecy=pp.reduce((s,p)=>s+p.y,0)/pp.length;
-      snap();dctx.clearRect(ecx-ERASER_R,ecy-ERASER_R,ERASER_R*2,ERASER_R*2);
+      
+      // Proximity deletion
+      const initLen = strokes.length;
+      strokes = strokes.filter(s => {
+        let pts = s.points || s.ap || s.sm;
+        if (s.type === 'shape' && (s.shape === 'CIRCLE' || s.shape === 'RECTANGLE' || s.shape === 'SQUARE')) {
+            pts = [{x: s.x0, y: s.y0}, {x: s.x0+s.w, y: s.y0}, {x: s.x0+s.w, y: s.y0+s.h}, {x: s.x0, y: s.y0+s.h}]; 
+        }
+        if (pts) {
+          for(const p of pts) {
+            if (dst(p, {x:ecx,y:ecy}) < ERASER_R) return false;
+          }
+        }
+        return true;
+      });
+      if (strokes.length !== initLen) {
+        snap();
+        if(selectedStroke && !strokes.find(s=>s.id === selectedStroke.id)) selectedStroke = null;
+        renderStrokes();
+      }
+      
       octx.beginPath();octx.arc(ecx,ecy,ERASER_R,0,Math.PI*2);octx.strokeStyle='#ff4444';octx.lineWidth=2;octx.stroke();
       setMode('ERASE','#ff5555');prevPt=null;finishStroke();inMenu=false;
 
     }else if(mode==='MOVE'){
-      updatePinch(pinching(lms));
+      updatePinch(false); // don't trigger undo/redo tap detector
       const mx=(ix+tt.x)/2,my=(iy+tt.y)/2;
-      if(isMoveActive){
-        if(!moveAnchor){moveAnchor={x:mx,y:my};moveBase={...cvOff};}
-        else{cvOff.x=moveBase.x+(mx-moveAnchor.x);cvOff.y=moveBase.y+(my-moveAnchor.y);applyXform();}
+      const p = pinching(lms);
+      
+      if (p && !pinchActive) {
+         pinchActive = true;
+         // Select object
+         const found = findNearestStroke(mx, my);
+         if (!selectedStroke || (found && selectedStroke.id !== found.id)) {
+            selectedStroke = found;
+            renderStrokes();
+         } else if (!found) {
+            selectedStroke = null;
+            renderStrokes();
+         }
+         moveAnchor = {x: mx, y: my};
+      } else if (p && pinchActive) {
+         if (selectedStroke && moveAnchor) {
+            const dx = mx - moveAnchor.x;
+            const dy = my - moveAnchor.y;
+            moveStroke(selectedStroke, dx, dy);
+            renderStrokes();
+            moveAnchor = {x: mx, y: my};
+         }
+      } else if (!p && pinchActive) {
+         pinchActive = false;
+         moveAnchor = null;
+         snap(); // End of drag
+         // Release deselects
+         selectedStroke = null;
+         renderStrokes();
       }
+      
       octx.beginPath();octx.arc(mx,my,14,0,Math.PI*2);octx.fillStyle='rgba(255,160,50,.8)';octx.fill();
       octx.beginPath();octx.moveTo(tt.x,tt.y);octx.lineTo(ix,iy);octx.strokeStyle='#ffaa44';octx.lineWidth=2;octx.stroke();
       setMode('MOVE','#ffaa44');prevPt=null;finishStroke();inMenu=false;
@@ -278,9 +491,24 @@ function onResults(res){
     }else if(mode==='DRAW'){
       if(inMenu){inMenu=false;dwellTarget=null;}
       updatePinch(false);setMode('DRAW','#64ff96');
+      
       octx.beginPath();octx.arc(ix,iy,brush/2+3,0,Math.PI*2);octx.fillStyle=color;octx.fill();octx.strokeStyle='#fff';octx.lineWidth=1;octx.stroke();
-      if(!prevPt){prevPt={x:ix,y:iy};strokePts=[{x:ix,y:iy}];snap();}
-      else{const d=dst({x:ix,y:iy},prevPt);if(d>=MIN_PX){dctx.beginPath();dctx.moveTo(prevPt.x,prevPt.y);dctx.lineTo(ix,iy);dctx.strokeStyle=color;dctx.lineWidth=brush;dctx.lineCap='round';dctx.lineJoin='round';dctx.stroke();prevPt={x:ix,y:iy};strokePts.push({x:ix,y:iy});}}
+      
+      if(!prevPt){
+        prevPt={x:ix,y:iy};
+        snap();
+        currentStroke = { id: ++strokeIdCounter, type: 'stroke', points: [{x:ix,y:iy}], color: color, brush: brush };
+        strokes.push(currentStroke);
+      } else {
+        const d=dst({x:ix,y:iy},prevPt);
+        if(d>=MIN_PX){
+          prevPt={x:ix,y:iy};
+          if (currentStroke) {
+             currentStroke.points.push({x:ix,y:iy});
+             renderStrokes(); // Redraw instantly
+          }
+        }
+      }
       wasDrawing=true;
 
     }else if(mode==='CURSOR'){
