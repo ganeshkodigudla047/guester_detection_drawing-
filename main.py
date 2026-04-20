@@ -1025,7 +1025,7 @@ class TwoFingerTapDetector:
 # of each other, then separate.
 # Triggers CLEAR on the clap release.
 # ─────────────────────────────────────────────
-CLAP_THRESHOLD  = 120   # px — max wrist-to-wrist distance to count as clap
+CLAP_THRESHOLD  = 200   # px — max wrist-to-wrist distance to count as clap
 CLAP_COOLDOWN   = 1.5   # seconds between clap triggers
 
 class ClapDetector:
@@ -1043,7 +1043,7 @@ class ClapDetector:
         """
         Parameters
         ----------
-        lms_list : list of 2 landmark lists (from two detected hands)
+        lms_list : list of landmark lists (1 or 2 hands)
         fw, fh   : frame width / height
 
         Returns
@@ -1053,32 +1053,35 @@ class ClapDetector:
         now    = time.time()
         action = None
 
+        if self.action_label and now - self._action_label_time > ACTION_LABEL_SECS:
+            self.action_label = ""
+
         if len(lms_list) < 2:
-            self._clapping = False
-            if self.action_label and now - self._action_label_time > ACTION_LABEL_SECS:
-                self.action_label = ""
-            return None
+            # Went from 2 hands to 1 — could be a clap merge
+            if self._clapping:
+                self._clapping = False
+                if now - self._last_clap >= CLAP_COOLDOWN:
+                    action = "CLEAR"
+                    self._last_clap = now
+                    self._set_label("CLAP! CLEARED")
+            return action
 
         # Use wrist (landmark 0) of each hand
         w0 = lm_px(lms_list[0], 0, fw, fh)
         w1 = lm_px(lms_list[1], 0, fw, fh)
-        dist = float(np.hypot(w0[0] - w1[0], w0[1] - w1[1]))
+        d  = float(np.hypot(w0[0] - w1[0], w0[1] - w1[1]))
 
-        hands_close = dist < CLAP_THRESHOLD
-
-        if hands_close and not self._clapping:
+        if d < CLAP_THRESHOLD and not self._clapping:
+            # Hands came together
             self._clapping = True
 
-        elif not hands_close and self._clapping:
-            # Hands just separated — clap complete
+        elif d >= CLAP_THRESHOLD and self._clapping:
+            # Hands separated after being close — clap complete
             self._clapping = False
             if now - self._last_clap >= CLAP_COOLDOWN:
                 action = "CLEAR"
                 self._last_clap = now
                 self._set_label("CLAP! CLEARED")
-
-        if self.action_label and now - self._action_label_time > ACTION_LABEL_SECS:
-            self.action_label = ""
 
         return action
 
@@ -1872,6 +1875,26 @@ def main():
         # ONE HAND — single-hand gestures
         # ══════════════════════════════════════════════════════
         elif n_hands == 1:
+            # Check for clap-merge (was 2 hands, now 1 = hands clapped together)
+            clap_action = clap_detector.update(
+                [h.landmark for h in results.multi_hand_landmarks], fw, fh)
+            if clap_action == "CLEAR":
+                base_canvas[:] = 0
+                strokes_3d     = []
+                current_stroke = None
+                z_history.clear()
+                offset_x, offset_y = 0, 0
+                scale_factor       = 1.0
+                zoom_target_scale  = 1.0
+                single_debouncer.reset()
+                zoom_debouncer.reset()
+                pinch_detector.reset()
+                two_finger_detector.reset()
+                undo_manager.reset()
+                shape_detector.reset()
+                pan_prev_wrist_x = None
+                pan_smooth_dx    = 0.0
+                print("[INFO] Canvas cleared by CLAP gesture.")
             in_zoom = False
             zoom_initial_dist = None
             zoom_debouncer.reset()
@@ -1943,7 +1966,8 @@ def main():
                     cv2.putText(frame, "ERASING",
                                 (pcx - 35, pcy - ERASER_RADIUS - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2)
-                prev_x, prev_y = None, None
+                prev_x, prev_y     = None, None
+                smooth_x, smooth_y = None, None   # reset so DRAW re-entry snaps to finger
                 in_pinch = False
                 # Erase nearby 3D strokes whose projected centroid is in range
                 if depth_enabled and strokes_3d:
@@ -2009,7 +2033,8 @@ def main():
                 cv2.line(frame,
                          (int(smooth_thumb_x), int(smooth_thumb_y)),
                          (ix, iy), (255, 100, 0), 2)
-                prev_x, prev_y = None, None
+                prev_x, prev_y     = None, None
+                smooth_x, smooth_y = None, None   # reset so DRAW re-entry snaps to finger
                 if current_stroke is not None and len(current_stroke) > 0:
                     strokes_3d.append(current_stroke)
                 current_stroke = None
@@ -2102,7 +2127,8 @@ def main():
                     base_canvas, strokes_3d = undo_manager.redo(
                         base_canvas, strokes_3d)
 
-                prev_x, prev_y = None, None
+                prev_x, prev_y     = None, None
+                smooth_x, smooth_y = None, None   # reset so DRAW re-entry snaps to finger
 
                 # Visual: hollow circle cursor + tap indicator
                 cursor_col = (255, 200, 0)
@@ -2125,12 +2151,8 @@ def main():
             else:
                 _draw_cx, _draw_cy = 0, 0
                 in_pinch = False
-                _idle_pinch = pinch_detector.update(False)
-                if False:  # UNDO/REDO now handled by two_finger_detector in CURSOR
-                    pass
-                elif False:
-                    base_canvas, strokes_3d = undo_manager.redo(
-                        base_canvas, strokes_3d)
+                smooth_x, smooth_y = None, None   # reset so DRAW re-entry snaps to finger
+                pinch_detector.update(False)
                 prev_x, prev_y = None, None
                 if current_stroke is not None and len(current_stroke) > 0:
                     strokes_3d.append(current_stroke)
@@ -2154,6 +2176,8 @@ def main():
         # NO HANDS
         # ══════════════════════════════════════════════════════
         else:
+            # Flush clap state when hands leave frame
+            clap_detector.update([], fw, fh)
             prev_x, prev_y     = None, None
             smooth_x, smooth_y = None, None
             in_pinch           = False
