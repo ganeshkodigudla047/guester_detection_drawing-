@@ -1210,6 +1210,324 @@ class UndoRedoManager:
         self._redo_stack.clear()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ██  OBJECT-LEVEL STROKE MANAGEMENT  (Features 2, 3, 4)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────
+# Stroke2D
+# One complete 2D drawing stroke stored as a
+# list of canvas-space (x, y) points.
+# Supports per-object drag and scale.
+# ─────────────────────────────────────────────
+class Stroke2D:
+    """A single drawn stroke with its own color, thickness, and point list."""
+    def __init__(self, color, thickness):
+        self.points    = []          # list of (x, y) canvas-space ints
+        self.color     = color       # BGR tuple
+        self.thickness = thickness   # px
+
+    def add_point(self, x, y):
+        self.points.append((int(x), int(y)))
+
+    def center(self):
+        """Return (cx, cy) centroid of all points."""
+        if not self.points:
+            return (0, 0)
+        xs = [p[0] for p in self.points]
+        ys = [p[1] for p in self.points]
+        return (int(np.mean(xs)), int(np.mean(ys)))
+
+    def bounding_box(self):
+        """Return (x1, y1, x2, y2) tight bounding box."""
+        if not self.points:
+            return (0, 0, 0, 0)
+        xs = [p[0] for p in self.points]
+        ys = [p[1] for p in self.points]
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def distance_to(self, px, py):
+        """Minimum distance from point (px, py) to any point in this stroke."""
+        if not self.points:
+            return float('inf')
+        return float(min(np.hypot(p[0] - px, p[1] - py) for p in self.points))
+
+    def draw(self, canvas):
+        """Render this stroke onto canvas."""
+        if len(self.points) < 2:
+            if self.points:
+                cv2.circle(canvas, self.points[0],
+                           max(self.thickness // 2, 1),
+                           self.color, -1, lineType=cv2.LINE_AA)
+            return
+        for i in range(1, len(self.points)):
+            cv2.line(canvas, self.points[i - 1], self.points[i],
+                     self.color, self.thickness, lineType=cv2.LINE_AA)
+
+    def draw_selected(self, canvas):
+        """Render with a selection highlight (dashed bounding box)."""
+        self.draw(canvas)
+        x1, y1, x2, y2 = self.bounding_box()
+        pad = 8
+        cv2.rectangle(canvas,
+                      (x1 - pad, y1 - pad),
+                      (x2 + pad, y2 + pad),
+                      (0, 255, 200), 1, lineType=cv2.LINE_AA)
+
+    def __len__(self):
+        return len(self.points)
+
+
+# ─────────────────────────────────────────────
+# Standalone functions (per spec)
+# ─────────────────────────────────────────────
+
+def start_new_stroke(color, thickness):
+    """Create and return a new empty Stroke2D."""
+    return Stroke2D(color, thickness)
+
+
+def update_stroke(stroke, x, y):
+    """
+    Add point (x, y) to stroke if it moved enough.
+    Returns True if a point was added.
+    """
+    if not stroke.points:
+        stroke.add_point(x, y)
+        return True
+    last = stroke.points[-1]
+    if np.hypot(x - last[0], y - last[1]) >= MIN_DRAW_DIST:
+        stroke.add_point(x, y)
+        return True
+    return False
+
+
+def end_stroke(stroke):
+    """
+    Finalise a stroke. Returns the stroke if it has points, else None.
+    Caller should append to the stroke list.
+    """
+    return stroke if stroke and len(stroke) > 0 else None
+
+
+def select_object(strokes, px, py, max_dist=60):
+    """
+    Find the stroke closest to canvas point (px, py).
+
+    Parameters
+    ----------
+    strokes  : list of Stroke2D
+    px, py   : canvas-space query point
+    max_dist : ignore strokes farther than this (px)
+
+    Returns
+    -------
+    index of selected stroke, or -1 if none within max_dist
+    """
+    best_idx  = -1
+    best_dist = max_dist
+    for i, s in enumerate(strokes):
+        d = s.distance_to(px, py)
+        if d < best_dist:
+            best_dist = d
+            best_idx  = i
+    return best_idx
+
+
+def move_object(stroke, dx, dy):
+    """
+    Translate all points of stroke by (dx, dy).
+    Modifies in-place.
+    """
+    stroke.points = [(p[0] + int(dx), p[1] + int(dy))
+                     for p in stroke.points]
+
+
+def scale_object(stroke, scale_factor):
+    """
+    Scale stroke points relative to their centroid.
+
+    Parameters
+    ----------
+    stroke       : Stroke2D to scale
+    scale_factor : float multiplier (>1 = zoom in, <1 = zoom out)
+    """
+    if not stroke.points:
+        return
+    cx, cy = stroke.center()
+    stroke.points = [
+        (int(cx + (p[0] - cx) * scale_factor),
+         int(cy + (p[1] - cy) * scale_factor))
+        for p in stroke.points
+    ]
+
+
+# ─────────────────────────────────────────────
+# StrokeManager
+# Owns the list of all 2D strokes.
+# Handles: active stroke building, selection,
+# drag, per-object zoom, undo/redo snapshots,
+# and rendering to a canvas.
+# ─────────────────────────────────────────────
+class StrokeManager:
+    """
+    Central manager for all 2D drawing strokes.
+
+    Replaces direct drawing onto base_canvas for 2D strokes.
+    The canvas is rebuilt from strokes each frame (or on change).
+    """
+    def __init__(self):
+        self.strokes        = []      # list of completed Stroke2D
+        self.active_stroke  = None    # stroke being drawn right now
+        self.selected_idx   = -1      # index of selected stroke (-1 = none)
+
+        # Object drag state
+        self._drag_anchor_x = 0       # canvas-space x when drag started
+        self._drag_anchor_y = 0
+        self._drag_pts_snap = []      # snapshot of selected stroke points at drag start
+
+        # Object zoom state
+        self.obj_zoom_active   = False
+        self._obj_zoom_init_d  = 0.0
+        self._obj_zoom_pts_snap = []  # snapshot of selected stroke points at zoom start
+
+    # ── Drawing ──────────────────────────────────────────────
+    def begin_draw(self, color, thickness):
+        """Start a new stroke. Call when DRAW mode begins."""
+        self.active_stroke = start_new_stroke(color, thickness)
+        self.selected_idx  = -1   # deselect on new draw
+
+    def add_draw_point(self, x, y):
+        """Add a point to the active stroke. Returns True if point added."""
+        if self.active_stroke is None:
+            return False
+        return update_stroke(self.active_stroke, x, y)
+
+    def finish_draw(self):
+        """
+        Finalise the active stroke and add to list.
+        Returns the completed Stroke2D or None.
+        """
+        s = end_stroke(self.active_stroke)
+        self.active_stroke = None
+        if s:
+            self.strokes.append(s)
+        return s
+
+    # ── Selection ────────────────────────────────────────────
+    def try_select(self, px, py):
+        """
+        Try to select a stroke near (px, py).
+        Returns selected index or -1.
+        """
+        self.selected_idx = select_object(self.strokes, px, py)
+        return self.selected_idx
+
+    # ── Drag ─────────────────────────────────────────────────
+    def begin_drag(self, px, py):
+        """Record drag anchor when pinch starts on a selected stroke."""
+        self._drag_anchor_x = px
+        self._drag_anchor_y = py
+        if self.selected_idx >= 0:
+            self._drag_pts_snap = list(self.strokes[self.selected_idx].points)
+
+    def update_drag(self, px, py):
+        """Move selected stroke to follow finger. Call every frame during drag."""
+        if self.selected_idx < 0:
+            return
+        dx = px - self._drag_anchor_x
+        dy = py - self._drag_anchor_y
+        # Restore snapshot + apply total delta (avoids drift)
+        self.strokes[self.selected_idx].points = [
+            (p[0] + int(dx), p[1] + int(dy))
+            for p in self._drag_pts_snap
+        ]
+
+    def end_drag(self):
+        """Release drag."""
+        self._drag_pts_snap = []
+
+    # ── Object zoom ──────────────────────────────────────────
+    def begin_obj_zoom(self, init_dist):
+        """Record initial pinch distance for object zoom."""
+        if self.selected_idx < 0:
+            return
+        self.obj_zoom_active    = True
+        self._obj_zoom_init_d   = max(init_dist, 1.0)
+        self._obj_zoom_pts_snap = list(self.strokes[self.selected_idx].points)
+
+    def update_obj_zoom(self, curr_dist):
+        """Scale selected stroke by ratio of current/initial pinch distance."""
+        if self.selected_idx < 0 or not self.obj_zoom_active:
+            return
+        raw_scale = curr_dist / self._obj_zoom_init_d
+        raw_scale = float(np.clip(raw_scale, 0.1, 10.0))
+        s = self.strokes[self.selected_idx]
+        # Compute centroid from snapshot
+        if not self._obj_zoom_pts_snap:
+            return
+        cx = int(np.mean([p[0] for p in self._obj_zoom_pts_snap]))
+        cy = int(np.mean([p[1] for p in self._obj_zoom_pts_snap]))
+        s.points = [
+            (int(cx + (p[0] - cx) * raw_scale),
+             int(cy + (p[1] - cy) * raw_scale))
+            for p in self._obj_zoom_pts_snap
+        ]
+
+    def end_obj_zoom(self):
+        self.obj_zoom_active    = False
+        self._obj_zoom_pts_snap = []
+
+    # ── Rendering ────────────────────────────────────────────
+    def render(self, canvas):
+        """
+        Redraw all strokes onto canvas (clears first).
+        Call whenever strokes change.
+        """
+        canvas[:] = 0
+        for i, s in enumerate(self.strokes):
+            if i == self.selected_idx:
+                s.draw_selected(canvas)
+            else:
+                s.draw(canvas)
+        if self.active_stroke:
+            self.active_stroke.draw(canvas)
+
+    def render_overlay(self, canvas):
+        """
+        Draw only the active (in-progress) stroke on top of canvas.
+        More efficient than full re-render every frame.
+        """
+        if self.active_stroke:
+            self.active_stroke.draw(canvas)
+
+    # ── Undo / Redo support ──────────────────────────────────
+    def snapshot(self):
+        """Return a deep copy of current strokes for undo stack."""
+        import copy
+        return copy.deepcopy(self.strokes)
+
+    def restore(self, snap):
+        """Restore strokes from a snapshot."""
+        import copy
+        self.strokes       = copy.deepcopy(snap)
+        self.selected_idx  = -1
+        self.active_stroke = None
+
+    # ── Misc ─────────────────────────────────────────────────
+    def clear(self):
+        self.strokes        = []
+        self.active_stroke  = None
+        self.selected_idx   = -1
+        self.obj_zoom_active = False
+
+    def delete_selected(self):
+        """Remove the currently selected stroke."""
+        if 0 <= self.selected_idx < len(self.strokes):
+            self.strokes.pop(self.selected_idx)
+            self.selected_idx = -1
+
+
 # ─────────────────────────────────────────────
 # draw_on_canvas()
 # Smooth line with jitter filter
@@ -1796,6 +2114,19 @@ def main():
     clap_detector       = ClapDetector()           # clap → CLEAR
     undo_manager        = UndoRedoManager()        # canvas + 3D stroke history
 
+    # ── Stroke manager (object-level 2D drawing) ──────────────────────────
+    stroke_mgr        = StrokeManager()
+    stroke_undo_stack = []   # list of stroke snapshots for undo
+    stroke_redo_stack = []   # list of stroke snapshots for redo
+    STROKE_UNDO_MAX   = 30
+
+    # Object drag state (used in MOVE mode)
+    obj_drag_active   = False   # True while dragging a selected stroke
+    obj_drag_started  = False   # first frame of drag
+
+    # Object zoom state (used in TWO HANDS mode when one stroke selected)
+    obj_zoom_init_dist = 0.0
+
     # ── Feature 1: Object detection + Blueprint ───────────────────────────
     obj_detector   = ObjectDetector()
     blueprint_mode = False   # 'b' toggles blueprint rendering
@@ -1804,6 +2135,27 @@ def main():
     # ── Feature 2: Canvas pan ─────────────────────────────────────────────
     pan_prev_wrist_x = None   # wrist x from previous frame (screen px)
     pan_smooth_dx    = 0.0    # EMA-smoothed horizontal delta
+
+    # ── Stroke undo/redo helpers (closures over stroke_mgr stacks) ────────
+    def stroke_snap():
+        stroke_undo_stack.append(stroke_mgr.snapshot())
+        if len(stroke_undo_stack) > STROKE_UNDO_MAX:
+            stroke_undo_stack.pop(0)
+        stroke_redo_stack.clear()
+
+    def stroke_undo():
+        if not stroke_undo_stack:
+            return
+        stroke_redo_stack.append(stroke_mgr.snapshot())
+        stroke_mgr.restore(stroke_undo_stack.pop())
+        stroke_mgr.render(base_canvas)
+
+    def stroke_redo():
+        if not stroke_redo_stack:
+            return
+        stroke_undo_stack.append(stroke_mgr.snapshot())
+        stroke_mgr.restore(stroke_redo_stack.pop())
+        stroke_mgr.render(base_canvas)
 
     prev_time = time.time()
     mode = "IDLE"
@@ -1884,6 +2236,9 @@ def main():
             clap_action = clap_detector.update(lms_list, fw, fh)
             if clap_action == "CLEAR":
                 clear_canvas(base_canvas)
+                stroke_mgr.clear()
+                stroke_undo_stack.clear()
+                stroke_redo_stack.clear()
                 strokes_3d     = []
                 current_stroke = None
                 z_history.clear()
@@ -1898,6 +2253,8 @@ def main():
                 shape_detector.reset()
                 pan_prev_wrist_x = None
                 pan_smooth_dx    = 0.0
+                obj_drag_active  = False
+                obj_drag_started = False
                 print("[INFO] Canvas cleared by CLAP gesture.")
             else:
                 # Show live hand distance as clap guide (only when not zooming)
@@ -1912,22 +2269,50 @@ def main():
             if stable_two == "ZOOM":
                 mode = "ZOOM"
                 single_debouncer.reset()
-                (in_zoom, zoom_initial_dist, zoom_initial_scale,
-                 zoom_target_scale, scale_factor,
-                 pt1, pt2) = zoom_canvas(
-                    lms_list[0], lms_list[1], fw, fh,
-                    in_zoom, zoom_initial_dist, zoom_initial_scale,
-                    zoom_target_scale, scale_factor)
-                cv2.line(frame, pt1, pt2, (0, 220, 255), 2)
-                cv2.circle(frame, pt1, 12, (0, 220, 255), -1)
-                cv2.circle(frame, pt2, 12, (0, 220, 255), -1)
-                mid = ((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)
-                cv2.putText(frame, f"Zoom: {int(scale_factor * 100)}%",
-                            (mid[0] - 45, mid[1] - 18),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2)
+
+                # ── Feature 3: Object zoom vs canvas zoom ─────────────────
+                # If a stroke is selected, zoom only that object.
+                # Otherwise zoom the whole canvas as before.
+                t0 = lm_px(lms_list[0], 4, fw, fh)
+                i0 = lm_px(lms_list[0], 8, fw, fh)
+                t1 = lm_px(lms_list[1], 4, fw, fh)
+                i1 = lm_px(lms_list[1], 8, fw, fh)
+                m0 = ((t0[0] + i0[0]) // 2, (t0[1] + i0[1]) // 2)
+                m1 = ((t1[0] + i1[0]) // 2, (t1[1] + i1[1]) // 2)
+                curr_pinch_dist = float(np.hypot(m0[0] - m1[0], m0[1] - m1[1]))
+
+                if stroke_mgr.selected_idx >= 0:
+                    # Object zoom
+                    if not stroke_mgr.obj_zoom_active:
+                        stroke_mgr.begin_obj_zoom(curr_pinch_dist)
+                    else:
+                        stroke_mgr.update_obj_zoom(curr_pinch_dist)
+                        stroke_mgr.render(base_canvas)
+                    cv2.putText(frame, "OBJECT ZOOM",
+                                (fw // 2 - 70, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                                (0, 220, 255), 2, cv2.LINE_AA)
+                else:
+                    # Canvas zoom (existing behaviour)
+                    stroke_mgr.end_obj_zoom()
+                    (in_zoom, zoom_initial_dist, zoom_initial_scale,
+                     zoom_target_scale, scale_factor,
+                     pt1, pt2) = zoom_canvas(
+                        lms_list[0], lms_list[1], fw, fh,
+                        in_zoom, zoom_initial_dist, zoom_initial_scale,
+                        zoom_target_scale, scale_factor)
+                    mid = ((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)
+                    cv2.putText(frame, f"Zoom: {int(scale_factor * 100)}%",
+                                (mid[0] - 45, mid[1] - 18),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2)
+
+                cv2.line(frame, m0, m1, (0, 220, 255), 2)
+                cv2.circle(frame, m0, 12, (0, 220, 255), -1)
+                cv2.circle(frame, m1, 12, (0, 220, 255), -1)
             else:
                 in_zoom = False
                 zoom_initial_dist = None
+                stroke_mgr.end_obj_zoom()
                 mode = "IDLE"
 
             prev_x, prev_y     = None, None
@@ -1947,6 +2332,9 @@ def main():
                 [h.landmark for h in results.multi_hand_landmarks], fw, fh)
             if clap_action == "CLEAR":
                 clear_canvas(base_canvas)
+                stroke_mgr.clear()
+                stroke_undo_stack.clear()
+                stroke_redo_stack.clear()
                 strokes_3d     = []
                 current_stroke = None
                 z_history.clear()
@@ -1961,6 +2349,8 @@ def main():
                 shape_detector.reset()
                 pan_prev_wrist_x = None
                 pan_smooth_dx    = 0.0
+                obj_drag_active  = False
+                obj_drag_started = False
                 print("[INFO] Canvas cleared by CLAP gesture.")
             in_zoom = False
             zoom_initial_dist = None
@@ -2033,6 +2423,11 @@ def main():
                     cv2.putText(frame, "ERASING",
                                 (pcx - 35, pcy - ERASER_RADIUS - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2)
+                # Finish any active draw stroke before erasing
+                if stroke_mgr.active_stroke is not None:
+                    s = stroke_mgr.finish_draw()
+                    if s:
+                        stroke_snap()
                 prev_x, prev_y     = None, None
                 smooth_x, smooth_y = None, None   # reset so DRAW re-entry snaps to finger
                 in_pinch = False
@@ -2062,46 +2457,74 @@ def main():
             # ── MOVE ──────────────────────────────────────────
             elif mode == "MOVE":
                 _draw_cx, _draw_cy = 0, 0
-
-                # Feed pinch state to the tap/hold detector every frame
                 pinch_action = pinch_detector.update(True)
 
-                # Fire UNDO / REDO if a tap action was returned
-                # (shouldn't happen mid-hold, but guard anyway)
-                if pinch_action == "UNDO":
-                    base_canvas, strokes_3d = undo_manager.undo(
-                        base_canvas, strokes_3d)
-                elif pinch_action == "REDO":
-                    base_canvas, strokes_3d = undo_manager.redo(
-                        base_canvas, strokes_3d)
+                # Finish any active draw stroke
+                if stroke_mgr.active_stroke is not None:
+                    s = stroke_mgr.finish_draw()
+                    if s:
+                        stroke_snap()
+                        stroke_mgr.render(base_canvas)
 
-                # Drag logic — only active once hold threshold is crossed
                 mid_x = int((smooth_x + smooth_thumb_x) / 2)
                 mid_y = int((smooth_y + smooth_thumb_y) / 2)
 
+                # Map pinch midpoint to canvas space for object selection/drag
+                mid_cx, mid_cy = screen_to_canvas(
+                    mid_x, mid_y, fw, fh, cw, ch,
+                    offset_x, offset_y, scale_factor)
+
                 if pinch_detector.is_move:
-                    if not in_pinch:
-                        pinch_anchor_x     = mid_x
-                        pinch_anchor_y     = mid_y
-                        pinch_anchor_off_x = offset_x
-                        pinch_anchor_off_y = offset_y
-                        in_pinch = True
+                    if not obj_drag_started:
+                        # First drag frame — try to select a stroke object
+                        stroke_mgr.try_select(mid_cx, mid_cy)
+                        if stroke_mgr.selected_idx >= 0:
+                            # Object selected — drag it
+                            stroke_mgr.begin_drag(mid_cx, mid_cy)
+                            obj_drag_active  = True
+                        else:
+                            # No object nearby — fall back to canvas pan
+                            pinch_anchor_x     = mid_x
+                            pinch_anchor_y     = mid_y
+                            pinch_anchor_off_x = offset_x
+                            pinch_anchor_off_y = offset_y
+                            in_pinch           = True
+                            obj_drag_active    = False
+                        obj_drag_started = True
+
+                    elif obj_drag_active and stroke_mgr.selected_idx >= 0:
+                        # Drag selected stroke object
+                        stroke_mgr.update_drag(mid_cx, mid_cy)
+                        stroke_mgr.render(base_canvas)
+                        # Show selection highlight on frame
+                        s = stroke_mgr.strokes[stroke_mgr.selected_idx]
+                        x1, y1, x2, y2 = s.bounding_box()
+                        cv2.rectangle(frame,
+                                      (x1 - 8, y1 - 8), (x2 + 8, y2 + 8),
+                                      (0, 255, 200), 2)
+                        cv2.putText(frame, "DRAGGING",
+                                    (x1, y1 - 14),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                                    (0, 255, 200), 2, cv2.LINE_AA)
                     else:
+                        # Canvas pan (no object selected)
                         dx = mid_x - pinch_anchor_x
                         dy = mid_y - pinch_anchor_y
                         offset_x = pinch_anchor_off_x + dx
                         offset_y = pinch_anchor_off_y + dy
                 else:
-                    # Still in tap-detection window — don't drag yet
-                    in_pinch = False
+                    # Hold threshold not yet crossed
+                    in_pinch         = False
+                    obj_drag_started = False
 
+                # Visual feedback
                 cv2.circle(frame, (mid_x, mid_y), 14, (255, 100, 0), -1)
                 cv2.circle(frame, (mid_x, mid_y), 14, (255, 200, 100), 2)
                 cv2.line(frame,
                          (int(smooth_thumb_x), int(smooth_thumb_y)),
                          (ix, iy), (255, 100, 0), 2)
                 prev_x, prev_y     = None, None
-                smooth_x, smooth_y = None, None   # reset so DRAW re-entry snaps to finger
+                smooth_x, smooth_y = None, None
                 if current_stroke is not None and len(current_stroke) > 0:
                     strokes_3d.append(current_stroke)
                 current_stroke = None
@@ -2111,17 +2534,25 @@ def main():
                 in_pinch = False
                 _draw_cx, _draw_cy = 0, 0
                 pinch_detector.update(False)   # not pinching (MOVE only)
+                obj_drag_active  = False
+                obj_drag_started = False
 
                 if iy < 60:
-                    # Hovering over UI bar
+                    # Hovering over UI bar — select color/brush
                     current_color_idx, current_brush_idx = check_ui_click(
                         ix, iy, current_color_idx, current_brush_idx)
+                    # End any active stroke when entering UI bar
+                    if stroke_mgr.active_stroke is not None:
+                        s = stroke_mgr.finish_draw()
+                        if s:
+                            stroke_snap()
+                            stroke_mgr.render(base_canvas)
                     prev_x, prev_y = None, None
                     if current_stroke is not None and len(current_stroke) > 0:
                         strokes_3d.append(current_stroke)
                     current_stroke = None
                 else:
-                    # ── 2D canvas draw (always active) ────────
+                    # Map smoothed screen position → canvas space
                     cx2d, cy2d = screen_to_canvas(
                         ix, iy, fw, fh, cw, ch,
                         offset_x, offset_y, scale_factor)
@@ -2133,43 +2564,47 @@ def main():
                     brush = max(1, int(BRUSH_SIZES[current_brush_idx]
                                        / scale_factor))
 
-                    if prev_x is not None:
-                        if np.hypot(cx2d - prev_x, cy2d - prev_y) >= MIN_DRAW_DIST:
-                            cv2.line(base_canvas,
-                                     (prev_x, prev_y), (cx2d, cy2d),
-                                     color, brush, lineType=cv2.LINE_AA)
-                            prev_x, prev_y = cx2d, cy2d
-                    else:
+                    # ── Feature 1: Stroke reset — no jump on re-entry ─────
+                    # If this is the first DRAW frame (prev_x is None),
+                    # start a fresh stroke — never connect to old position.
+                    if prev_x is None:
+                        # Start new stroke object
+                        stroke_mgr.begin_draw(color, brush)
+                        stroke_mgr.add_draw_point(cx2d, cy2d)
+                        # Place a single dot (no line yet)
                         cv2.circle(base_canvas, (cx2d, cy2d),
                                    max(brush // 2, 1), color, -1,
                                    lineType=cv2.LINE_AA)
                         prev_x, prev_y = cx2d, cy2d
+                    else:
+                        # Continue existing stroke
+                        if stroke_mgr.active_stroke is None:
+                            stroke_mgr.begin_draw(color, brush)
+                        added = stroke_mgr.add_draw_point(cx2d, cy2d)
+                        if added and np.hypot(cx2d - prev_x, cy2d - prev_y) >= MIN_DRAW_DIST:
+                            cv2.line(base_canvas,
+                                     (prev_x, prev_y), (cx2d, cy2d),
+                                     color, brush, lineType=cv2.LINE_AA)
+                            prev_x, prev_y = cx2d, cy2d
 
-                    # ── 3D stroke accumulation ─────────────────
+                    # ── 3D stroke accumulation (unchanged) ────────────────
                     if depth_enabled and smoothed_depth is not None:
                         raw_z = depth_smoother.get_depth_at(ix, iy)
                         z_history.append(raw_z)
                         smooth_z = float(np.mean(z_history))
-
                         X3, Y3, Z3 = convert_to_3D(
                             ix, iy, smooth_z,
                             FOCAL_LENGTH_X, FOCAL_LENGTH_Y,
                             cx_cam, cy_cam)
-
-                        # Transform to world space: p_world = R^T (p_cam - t)
                         p_cam   = np.array([X3, Y3, Z3], dtype=np.float64)
                         p_world = R_cam.T @ (p_cam - t_cam)
-
                         if current_stroke is None:
                             current_stroke = Stroke3D(color, brush)
-
                         if len(current_stroke) == 0:
                             current_stroke.add_point(*p_world)
                         else:
                             last = current_stroke.points[-1]
-                            dist3d = np.linalg.norm(
-                                np.array(p_world) - np.array(last))
-                            if dist3d > 0.001:
+                            if np.linalg.norm(np.array(p_world) - np.array(last)) > 0.001:
                                 current_stroke.add_point(*p_world)
 
                 cv2.circle(frame, (ix, iy), 7,
@@ -2188,9 +2623,11 @@ def main():
                 # Two-finger tap detection for UNDO / REDO
                 tap_action = two_finger_detector.update(landmarks)
                 if tap_action == "UNDO":
+                    stroke_undo()
                     base_canvas, strokes_3d = undo_manager.undo(
                         base_canvas, strokes_3d)
                 elif tap_action == "REDO":
+                    stroke_redo()
                     base_canvas, strokes_3d = undo_manager.redo(
                         base_canvas, strokes_3d)
 
@@ -2379,7 +2816,10 @@ def main():
                 print("[INFO] 3D depth mode OFF.")
 
         elif key == ord('c'):
-            base_canvas[:] = 0
+            clear_canvas(base_canvas)
+            stroke_mgr.clear()
+            stroke_undo_stack.clear()
+            stroke_redo_stack.clear()
             strokes_3d     = []
             current_stroke = None
             z_history.clear()
@@ -2395,6 +2835,8 @@ def main():
             shape_detector.reset()
             pan_prev_wrist_x = None
             pan_smooth_dx    = 0.0
+            obj_drag_active  = False
+            obj_drag_started = False
             print("[INFO] Canvas cleared.")
 
         elif key == ord('s'):
