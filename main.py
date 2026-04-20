@@ -87,8 +87,8 @@ SHAPE_POLY_EPSILON = 0.03  # approxPolyDP epsilon as fraction of perimeter
 
 # ── Object Detection + Blueprint Mode ────────────────────────────────────
 YOLO_MODEL_NAME    = "yolov8n.pt"   # nano = fastest; swap for yolov8s.pt etc.
-YOLO_CONF          = 0.45           # minimum detection confidence
-YOLO_INPUT_SIZE    = 416            # resize frame to this before YOLO inference
+YOLO_CONF          = 0.25           # minimum detection confidence (lowered for better recall)
+YOLO_INPUT_SIZE    = 640            # native YOLO resolution — better accuracy than 416
 BLUEPRINT_GRID_GAP = 40             # pixels between blueprint grid lines
 BLUEPRINT_BG       = (30, 10, 0)    # dark navy background (BGR)
 BLUEPRINT_EDGE_CLR = (255, 220, 80) # cyan-white edge colour (BGR)
@@ -1856,24 +1856,26 @@ class ObjectDetector:
             return []
 
         fh, fw = frame.shape[:2]
-        # Resize to YOLO_INPUT_SIZE for speed, run inference
-        scale_x = fw / YOLO_INPUT_SIZE
-        scale_y = fh / YOLO_INPUT_SIZE
-        small   = cv2.resize(frame, (YOLO_INPUT_SIZE, YOLO_INPUT_SIZE))
 
-        results = self._model(small, conf=YOLO_CONF, verbose=False)
+        # Pass frame directly — YOLO handles resizing internally
+        # and preserves aspect ratio (letterboxing), giving better accuracy
+        results = self._model(
+            frame,
+            conf=YOLO_CONF,
+            imgsz=YOLO_INPUT_SIZE,
+            verbose=False
+        )
         detections = []
         for r in results:
             for box in r.boxes:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
-                # Scale back to original frame size
                 detections.append({
                     'label': r.names[int(box.cls[0])],
                     'conf' : float(box.conf[0]),
-                    'x1'   : int(x1 * scale_x),
-                    'y1'   : int(y1 * scale_y),
-                    'x2'   : int(x2 * scale_x),
-                    'y2'   : int(y2 * scale_y),
+                    'x1'   : int(np.clip(x1, 0, fw)),
+                    'y1'   : int(np.clip(y1, 0, fh)),
+                    'x2'   : int(np.clip(x2, 0, fw)),
+                    'y2'   : int(np.clip(y2, 0, fh)),
                 })
         return detections
 
