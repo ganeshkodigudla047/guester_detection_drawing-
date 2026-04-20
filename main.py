@@ -61,6 +61,16 @@ ZOOM_SMOOTH = 0.80       # zoom EMA smoothing
 # Gesture debounce: how many consecutive frames a gesture must hold before activating
 GESTURE_DEBOUNCE_FRAMES = 3
 
+# ── Pinch tap / hold timing ───────────────────────────────────────────────
+PINCH_HOLD_SECS    = 0.5   # hold longer than this → MOVE (drag)
+PINCH_TAP_MAX_SECS = 0.3   # release faster than this → counts as a tap
+PINCH_DOUBLE_SECS  = 0.4   # two taps within this window → REDO
+PINCH_COOLDOWN     = 0.5   # minimum gap between undo/redo actions
+ACTION_LABEL_SECS  = 1.2   # how long to show UNDO / REDO banner on screen
+
+# ── Undo / Redo history ───────────────────────────────────────────────────
+UNDO_MAX_STEPS     = 30    # maximum undo levels kept in memory
+
 # Shape detection
 SHAPE_MIN_POINTS   = 20    # ignore strokes with fewer collected points
 SHAPE_MIN_AREA     = 800   # ignore shapes whose bounding area is too small (px²)
@@ -826,6 +836,177 @@ def render_3D_lines(frame, strokes_3d, R, t, fx, fy, cx_cam, cy_cam):
 
 
 # ─────────────────────────────────────────────
+# PinchActionDetector
+# Interprets pinch timing to distinguish:
+#   - Short tap  (<0.3 s)  → UNDO
+#   - Double tap (<0.4 s between taps) → REDO
+#   - Long hold  (>0.5 s)  → MOVE (drag & drop)
+#
+# Returns one of: 'MOVE', 'UNDO', 'REDO', None
+# ─────────────────────────────────────────────
+class PinchActionDetector:
+    """
+    State machine that watches pinch on/off transitions and
+    classifies them as MOVE, UNDO, or REDO.
+
+    Call update(is_pinching_now) every frame.
+    It returns an action string when one fires, else None.
+    """
+    def __init__(self):
+        self._active       = False   # pinch is currently held
+        self._start_time   = 0.0     # when current pinch started
+        self._tap_count    = 0       # taps in current burst
+        self._last_tap_end = 0.0     # when the last tap released
+        self._last_action  = 0.0     # time of last fired action (cooldown)
+        self.is_move       = False   # True while MOVE (hold) is active
+
+        # For UI feedback
+        self.action_label       = ""
+        self._action_label_time = 0.0
+
+    def update(self, pinching_now):
+        """
+        Feed the current pinch state each frame.
+
+        Parameters
+        ----------
+        pinching_now : bool — is the hand currently pinching?
+
+        Returns
+        -------
+        action : str or None — 'MOVE', 'UNDO', 'REDO', or None
+        """
+        now    = time.time()
+        action = None
+
+        # ── Pinch just started ────────────────────────────────
+        if pinching_now and not self._active:
+            self._active     = True
+            self._start_time = now
+
+        # ── Pinch is being held ───────────────────────────────
+        elif pinching_now and self._active:
+            hold_dur = now - self._start_time
+            if hold_dur >= PINCH_HOLD_SECS and not self.is_move:
+                # Crossed the hold threshold → activate MOVE
+                self.is_move = True
+                self._tap_count = 0   # cancel any pending tap count
+                action = "MOVE"
+                self._set_label("MOVE MODE")
+
+        # ── Pinch just released ───────────────────────────────
+        elif not pinching_now and self._active:
+            hold_dur = now - self._start_time
+            self._active = False
+
+            if self.is_move:
+                # End of a MOVE drag — no tap action
+                self.is_move = False
+            elif hold_dur < PINCH_TAP_MAX_SECS:
+                # Quick tap — check for double-tap window
+                if (self._tap_count == 1 and
+                        now - self._last_tap_end < PINCH_DOUBLE_SECS):
+                    # Second tap within window → REDO
+                    if now - self._last_action >= PINCH_COOLDOWN:
+                        action = "REDO"
+                        self._set_label("REDO")
+                        self._last_action = now
+                    self._tap_count = 0
+                else:
+                    # First tap — start counting
+                    self._tap_count  = 1
+                    self._last_tap_end = now
+
+            self._start_time = 0.0
+
+        # ── Check if single-tap window has expired → UNDO ─────
+        if (not pinching_now and
+                self._tap_count == 1 and
+                now - self._last_tap_end >= PINCH_DOUBLE_SECS):
+            if now - self._last_action >= PINCH_COOLDOWN:
+                action = "UNDO"
+                self._set_label("UNDO")
+                self._last_action = now
+            self._tap_count = 0
+
+        # ── Clear label after timeout ─────────────────────────
+        if (self.action_label and
+                now - self._action_label_time > ACTION_LABEL_SECS):
+            self.action_label = ""
+
+        return action
+
+    def _set_label(self, text):
+        self.action_label       = text
+        self._action_label_time = time.time()
+
+    def reset(self):
+        self._active     = False
+        self._start_time = 0.0
+        self._tap_count  = 0
+        self._last_tap_end = 0.0
+        self.is_move     = False
+        self.action_label = ""
+
+
+# ─────────────────────────────────────────────
+# UndoRedoManager
+# Maintains a history of canvas snapshots and
+# 3D stroke lists for undo / redo operations.
+# ─────────────────────────────────────────────
+class UndoRedoManager:
+    """
+    Stores canvas + 3D stroke state snapshots.
+    Call snapshot() after each completed stroke.
+    Call undo() / redo() to step through history.
+    """
+    def __init__(self, max_steps=UNDO_MAX_STEPS):
+        self.max_steps  = max_steps
+        self._undo_stack = []   # list of (canvas_copy, strokes_3d_copy)
+        self._redo_stack = []   # list of (canvas_copy, strokes_3d_copy)
+
+    def snapshot(self, canvas, strokes_3d):
+        """Save current state. Clears redo stack."""
+        self._undo_stack.append(
+            (canvas.copy(), list(strokes_3d)))
+        if len(self._undo_stack) > self.max_steps:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def undo(self, canvas, strokes_3d):
+        """
+        Restore previous state.
+        Returns (new_canvas, new_strokes_3d) or current values if nothing to undo.
+        """
+        if not self._undo_stack:
+            print("[UNDO] Nothing to undo.")
+            return canvas, strokes_3d
+        # Push current state onto redo stack
+        self._redo_stack.append((canvas.copy(), list(strokes_3d)))
+        prev_canvas, prev_strokes = self._undo_stack.pop()
+        print(f"[UNDO] Restored. ({len(self._undo_stack)} steps remain)")
+        return prev_canvas.copy(), list(prev_strokes)
+
+    def redo(self, canvas, strokes_3d):
+        """
+        Re-apply an undone state.
+        Returns (new_canvas, new_strokes_3d) or current values if nothing to redo.
+        """
+        if not self._redo_stack:
+            print("[REDO] Nothing to redo.")
+            return canvas, strokes_3d
+        # Push current state onto undo stack
+        self._undo_stack.append((canvas.copy(), list(strokes_3d)))
+        next_canvas, next_strokes = self._redo_stack.pop()
+        print(f"[REDO] Restored. ({len(self._redo_stack)} redo steps remain)")
+        return next_canvas.copy(), list(next_strokes)
+
+    def reset(self):
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+
+
+# ─────────────────────────────────────────────
 # draw_on_canvas()
 # Smooth line with jitter filter
 # ─────────────────────────────────────────────
@@ -962,7 +1143,8 @@ def screen_to_canvas(sx, sy, fw, fh, cw, ch, offset_x, offset_y, scale_factor):
 # draw_ui()
 # ─────────────────────────────────────────────
 def draw_ui(frame, current_color_idx, current_brush_idx,
-            mode, fps, scale_factor, shape_label="", depth_enabled=False):
+            mode, fps, scale_factor, shape_label="",
+            depth_enabled=False, action_label=""):
     h, w = frame.shape[:2]
 
     # Semi-transparent top bar
@@ -1025,6 +1207,30 @@ def draw_ui(frame, current_color_idx, current_brush_idx,
     if depth_enabled:
         cv2.putText(frame, "3D DEPTH ON", (w - 230, 58 + 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 200), 2)
+
+    # Action label (UNDO / REDO / MOVE MODE) — large centred banner
+    if action_label:
+        label_colors = {
+            "UNDO":      (80,  80,  255),
+            "REDO":      (80,  200, 80),
+            "MOVE MODE": (255, 140, 0),
+        }
+        ac = label_colors.get(action_label, (220, 220, 220))
+        (tw, th), _ = cv2.getTextSize(action_label,
+                                      cv2.FONT_HERSHEY_SIMPLEX, 1.6, 4)
+        lx = (w - tw) // 2
+        ly = h // 2
+        cv2.rectangle(frame,
+                      (lx - 20, ly - th - 16),
+                      (lx + tw + 20, ly + 16),
+                      (15, 15, 15), -1)
+        cv2.rectangle(frame,
+                      (lx - 20, ly - th - 16),
+                      (lx + tw + 20, ly + 16),
+                      ac, 3)
+        cv2.putText(frame, action_label, (lx, ly),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.6, ac, 4,
+                    lineType=cv2.LINE_AA)
 
     # Shape detection label — shown below the UI bar when active
     if shape_label:
@@ -1109,6 +1315,8 @@ def main():
     single_debouncer = GestureDebouncer(GESTURE_DEBOUNCE_FRAMES)
     zoom_debouncer   = GestureDebouncer(GESTURE_DEBOUNCE_FRAMES)
     shape_detector   = ShapeDetector()
+    pinch_detector   = PinchActionDetector()   # tap/hold → UNDO/REDO/MOVE
+    undo_manager     = UndoRedoManager()       # canvas + 3D stroke history
 
     prev_time = time.time()
     mode = "IDLE"
@@ -1242,6 +1450,7 @@ def main():
             # ── ERASE ─────────────────────────────────────────
             if mode == "ERASE":
                 _draw_cx, _draw_cy = 0, 0
+                pinch_detector.update(False)   # not pinching
                 palm_pts = [lm_px(landmarks, i, fw, fh)
                             for i in [0, 4, 8, 12, 16, 20]]
                 pcx = int(np.mean([p[0] for p in palm_pts]))
@@ -1283,19 +1492,39 @@ def main():
             # ── MOVE ──────────────────────────────────────────
             elif mode == "MOVE":
                 _draw_cx, _draw_cy = 0, 0
+
+                # Feed pinch state to the tap/hold detector every frame
+                pinch_action = pinch_detector.update(True)
+
+                # Fire UNDO / REDO if a tap action was returned
+                # (shouldn't happen mid-hold, but guard anyway)
+                if pinch_action == "UNDO":
+                    base_canvas, strokes_3d = undo_manager.undo(
+                        base_canvas, strokes_3d)
+                elif pinch_action == "REDO":
+                    base_canvas, strokes_3d = undo_manager.redo(
+                        base_canvas, strokes_3d)
+
+                # Drag logic — only active once hold threshold is crossed
                 mid_x = int((smooth_x + smooth_thumb_x) / 2)
                 mid_y = int((smooth_y + smooth_thumb_y) / 2)
-                if not in_pinch:
-                    pinch_anchor_x     = mid_x
-                    pinch_anchor_y     = mid_y
-                    pinch_anchor_off_x = offset_x
-                    pinch_anchor_off_y = offset_y
-                    in_pinch = True
+
+                if pinch_detector.is_move:
+                    if not in_pinch:
+                        pinch_anchor_x     = mid_x
+                        pinch_anchor_y     = mid_y
+                        pinch_anchor_off_x = offset_x
+                        pinch_anchor_off_y = offset_y
+                        in_pinch = True
+                    else:
+                        dx = mid_x - pinch_anchor_x
+                        dy = mid_y - pinch_anchor_y
+                        offset_x = pinch_anchor_off_x + dx
+                        offset_y = pinch_anchor_off_y + dy
                 else:
-                    dx = mid_x - pinch_anchor_x
-                    dy = mid_y - pinch_anchor_y
-                    offset_x = pinch_anchor_off_x + dx
-                    offset_y = pinch_anchor_off_y + dy
+                    # Still in tap-detection window — don't drag yet
+                    in_pinch = False
+
                 cv2.circle(frame, (mid_x, mid_y), 14, (255, 100, 0), -1)
                 cv2.circle(frame, (mid_x, mid_y), 14, (255, 200, 100), 2)
                 cv2.line(frame,
@@ -1310,6 +1539,16 @@ def main():
             elif mode == "DRAW":
                 in_pinch = False
                 _draw_cx, _draw_cy = 0, 0
+                pinch_action = pinch_detector.update(False)   # not pinching
+                # Tap actions while drawing (finger briefly pinched mid-stroke)
+                if pinch_action == "UNDO":
+                    base_canvas, strokes_3d = undo_manager.undo(
+                        base_canvas, strokes_3d)
+                    prev_x, prev_y = None, None
+                elif pinch_action == "REDO":
+                    base_canvas, strokes_3d = undo_manager.redo(
+                        base_canvas, strokes_3d)
+                    prev_x, prev_y = None, None
 
                 if iy < 60:
                     # Hovering over UI bar
@@ -1379,20 +1618,36 @@ def main():
             elif mode == "CURSOR":
                 _draw_cx, _draw_cy = 0, 0
                 in_pinch = False
+                pinch_action = pinch_detector.update(False)
+                if pinch_action == "UNDO":
+                    base_canvas, strokes_3d = undo_manager.undo(
+                        base_canvas, strokes_3d)
+                elif pinch_action == "REDO":
+                    base_canvas, strokes_3d = undo_manager.redo(
+                        base_canvas, strokes_3d)
                 prev_x, prev_y = None, None
                 cv2.circle(frame, (ix, iy), 12, (255, 200, 0), 2)
                 cv2.circle(frame, (ix, iy), 3,  (255, 200, 0), -1)
                 if current_stroke is not None and len(current_stroke) > 0:
                     strokes_3d.append(current_stroke)
+                    undo_manager.snapshot(base_canvas, strokes_3d)
                 current_stroke = None
 
             # ── IDLE ──────────────────────────────────────────
             else:
                 _draw_cx, _draw_cy = 0, 0
                 in_pinch = False
+                pinch_action = pinch_detector.update(False)
+                if pinch_action == "UNDO":
+                    base_canvas, strokes_3d = undo_manager.undo(
+                        base_canvas, strokes_3d)
+                elif pinch_action == "REDO":
+                    base_canvas, strokes_3d = undo_manager.redo(
+                        base_canvas, strokes_3d)
                 prev_x, prev_y = None, None
                 if current_stroke is not None and len(current_stroke) > 0:
                     strokes_3d.append(current_stroke)
+                    undo_manager.snapshot(base_canvas, strokes_3d)
                 current_stroke = None
 
             # ── Shape detector ────────────────────────────────
@@ -1400,9 +1655,13 @@ def main():
             _sd_cy  = _draw_cy if mode == "DRAW" else 0
             _color  = COLORS[COLOR_NAMES[current_color_idx]]
             _brush  = max(1, int(BRUSH_SIZES[current_brush_idx] / scale_factor))
+            _was_drawing_before = shape_detector.was_drawing
             shape_detector.update(
                 mode, _sd_cx, _sd_cy,
                 base_canvas, _color, _brush, cw, ch)
+            # Snapshot when a 2D stroke just completed (shape detector fired)
+            if _was_drawing_before and not shape_detector.was_drawing:
+                undo_manager.snapshot(base_canvas, strokes_3d)
 
         # ══════════════════════════════════════════════════════
         # NO HANDS
@@ -1415,8 +1674,10 @@ def main():
             zoom_initial_dist  = None
             single_debouncer.reset()
             zoom_debouncer.reset()
+            pinch_detector.reset()
             if current_stroke is not None and len(current_stroke) > 0:
                 strokes_3d.append(current_stroke)
+                undo_manager.snapshot(base_canvas, strokes_3d)
             current_stroke = None
             shape_detector.update(
                 "IDLE", 0, 0, base_canvas,
@@ -1461,7 +1722,8 @@ def main():
         frame = draw_ui(frame, current_color_idx, current_brush_idx,
                         mode, fps, scale_factor,
                         shape_label=shape_detector.label,
-                        depth_enabled=depth_enabled)
+                        depth_enabled=depth_enabled,
+                        action_label=pinch_detector.action_label)
 
         cv2.imshow(
             "Hand Gesture Drawing  [d=3D  c=clear  s=save  q=quit]", frame)
@@ -1497,6 +1759,8 @@ def main():
             zoom_target_scale   = 1.0
             single_debouncer.reset()
             zoom_debouncer.reset()
+            pinch_detector.reset()
+            undo_manager.reset()
             shape_detector.reset()
             print("[INFO] Canvas cleared.")
 
