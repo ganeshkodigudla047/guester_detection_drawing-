@@ -409,6 +409,7 @@ function onResults(results) {
   bctx.scale(-1, 1);
   bctx.drawImage(video, 0, 0, W, H);
   bctx.restore();
+
   // FPS
   frameCount++;
   const now = performance.now();
@@ -419,8 +420,6 @@ function onResults(results) {
     fpsLabel.textContent = `${fps} FPS`;
   }
 
-  const W = overlayCanvas.width;
-  const H = overlayCanvas.height;
   octx.clearRect(0, 0, W, H);
 
   const hands = results.multiHandLandmarks || [];
