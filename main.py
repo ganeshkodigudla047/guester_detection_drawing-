@@ -9,7 +9,10 @@ Gestures (single hand):
   - Index + Middle        → CURSOR MODE
   - Full Palm stationary  → ERASER MODE
   - Full Palm moving      → PAN MODE (slides canvas horizontally)
-  - Pinch (thumb+index)   → MOVE MODE
+  - Pinch hold (thumb+index) → MOVE MODE (drag canvas)
+  - Index+Middle up, tap down → UNDO
+  - Index+Middle up, double-tap → REDO
+  - Two hands CLAP        → CLEAR CANVAS
 
 Gestures (two hands):
   - BOTH hands pinching   → ZOOM MODE
@@ -863,92 +866,41 @@ def render_3D_lines(frame, strokes_3d, R, t, fx, fy, cx_cam, cy_cam):
 # ─────────────────────────────────────────────
 class PinchActionDetector:
     """
-    State machine that watches pinch on/off transitions and
-    classifies them as MOVE, UNDO, or REDO.
-
-    Call update(is_pinching_now) every frame.
-    It returns an action string when one fires, else None.
+    Watches thumb+index pinch transitions.
+    ONLY handles MOVE (hold > 0.5s).
+    UNDO/REDO are now handled by TwoFingerTapDetector (index+middle).
     """
     def __init__(self):
-        self._active       = False   # pinch is currently held
-        self._start_time   = 0.0     # when current pinch started
-        self._tap_count    = 0       # taps in current burst
-        self._last_tap_end = 0.0     # when the last tap released
-        self._last_action  = 0.0     # time of last fired action (cooldown)
-        self.is_move       = False   # True while MOVE (hold) is active
-
-        # For UI feedback
+        self._active     = False
+        self._start_time = 0.0
+        self.is_move     = False
         self.action_label       = ""
         self._action_label_time = 0.0
 
     def update(self, pinching_now):
         """
-        Feed the current pinch state each frame.
-
-        Parameters
-        ----------
-        pinching_now : bool — is the hand currently pinching?
-
-        Returns
-        -------
-        action : str or None — 'MOVE', 'UNDO', 'REDO', or None
+        Returns 'MOVE' when hold threshold crossed, else None.
         """
         now    = time.time()
         action = None
 
-        # ── Pinch just started ────────────────────────────────
         if pinching_now and not self._active:
             self._active     = True
             self._start_time = now
 
-        # ── Pinch is being held ───────────────────────────────
         elif pinching_now and self._active:
-            hold_dur = now - self._start_time
-            if hold_dur >= PINCH_HOLD_SECS and not self.is_move:
-                # Crossed the hold threshold → activate MOVE
+            if now - self._start_time >= PINCH_HOLD_SECS and not self.is_move:
                 self.is_move = True
-                self._tap_count = 0   # cancel any pending tap count
                 action = "MOVE"
                 self._set_label("MOVE MODE")
 
-        # ── Pinch just released ───────────────────────────────
         elif not pinching_now and self._active:
-            hold_dur = now - self._start_time
             self._active = False
-
             if self.is_move:
-                # End of a MOVE drag — no tap action
                 self.is_move = False
-            elif hold_dur < PINCH_TAP_MAX_SECS:
-                # Quick tap — check for double-tap window
-                if (self._tap_count == 1 and
-                        now - self._last_tap_end < PINCH_DOUBLE_SECS):
-                    # Second tap within window → REDO
-                    if now - self._last_action >= PINCH_COOLDOWN:
-                        action = "REDO"
-                        self._set_label("REDO")
-                        self._last_action = now
-                    self._tap_count = 0
-                else:
-                    # First tap — start counting
-                    self._tap_count  = 1
-                    self._last_tap_end = now
-
             self._start_time = 0.0
 
-        # ── Check if single-tap window has expired → UNDO ─────
-        if (not pinching_now and
-                self._tap_count == 1 and
-                now - self._last_tap_end >= PINCH_DOUBLE_SECS):
-            if now - self._last_action >= PINCH_COOLDOWN:
-                action = "UNDO"
-                self._set_label("UNDO")
-                self._last_action = now
-            self._tap_count = 0
-
-        # ── Clear label after timeout ─────────────────────────
-        if (self.action_label and
-                now - self._action_label_time > ACTION_LABEL_SECS):
+        if self.action_label and now - self._action_label_time > ACTION_LABEL_SECS:
             self.action_label = ""
 
         return action
@@ -960,9 +912,183 @@ class PinchActionDetector:
     def reset(self):
         self._active     = False
         self._start_time = 0.0
-        self._tap_count  = 0
-        self._last_tap_end = 0.0
         self.is_move     = False
+        self.action_label = ""
+
+
+# ─────────────────────────────────────────────
+# TwoFingerTapDetector
+# Detects index + middle finger tap gestures
+# for UNDO (single tap) and REDO (double tap).
+#
+# "Tap" = index AND middle fingers quickly
+# dip down (tips drop below a threshold) and
+# come back up within TAP_MAX_SECS.
+# ─────────────────────────────────────────────
+class TwoFingerTapDetector:
+    """
+    Monitors the vertical position of index (8) and middle (12) fingertips.
+    When both tips dip below their MCP joints simultaneously and recover
+    quickly, it counts as a tap.
+
+    Single tap  → UNDO
+    Double tap  → REDO  (second tap within PINCH_DOUBLE_SECS)
+    """
+    def __init__(self):
+        self._down       = False   # fingers currently dipped
+        self._down_start = 0.0
+        self._tap_count  = 0
+        self._last_tap   = 0.0
+        self._last_action = 0.0
+        self.action_label       = ""
+        self._action_label_time = 0.0
+
+    def _fingers_dipped(self, landmarks):
+        """
+        True when BOTH index and middle tips are BELOW their MCP joints.
+        This is the opposite of the normal 'up' state — a deliberate dip.
+        """
+        idx_dipped = landmarks[8].y  > landmarks[5].y  + 0.04
+        mid_dipped = landmarks[12].y > landmarks[9].y  + 0.04
+        return idx_dipped and mid_dipped
+
+    def update(self, landmarks):
+        """
+        Call every frame when in CURSOR mode (index+middle up).
+
+        Parameters
+        ----------
+        landmarks : MediaPipe hand landmark list
+
+        Returns
+        -------
+        action : 'UNDO', 'REDO', or None
+        """
+        now    = time.time()
+        action = None
+        dipped = self._fingers_dipped(landmarks)
+
+        if dipped and not self._down:
+            # Fingers just dipped
+            self._down       = True
+            self._down_start = now
+
+        elif not dipped and self._down:
+            # Fingers just came back up
+            dur = now - self._down_start
+            self._down = False
+            if dur < PINCH_TAP_MAX_SECS:
+                # Quick dip = tap
+                if (self._tap_count == 1 and
+                        now - self._last_tap < PINCH_DOUBLE_SECS):
+                    # Double tap → REDO
+                    if now - self._last_action >= PINCH_COOLDOWN:
+                        action = "REDO"
+                        self._set_label("REDO")
+                        self._last_action = now
+                    self._tap_count = 0
+                else:
+                    self._tap_count = 1
+                    self._last_tap  = now
+
+        # Single-tap window expired → UNDO
+        if (not dipped and self._tap_count == 1 and
+                now - self._last_tap >= PINCH_DOUBLE_SECS):
+            if now - self._last_action >= PINCH_COOLDOWN:
+                action = "UNDO"
+                self._set_label("UNDO")
+                self._last_action = now
+            self._tap_count = 0
+
+        if self.action_label and now - self._action_label_time > ACTION_LABEL_SECS:
+            self.action_label = ""
+
+        return action
+
+    def _set_label(self, text):
+        self.action_label       = text
+        self._action_label_time = time.time()
+
+    def reset(self):
+        self._down       = False
+        self._down_start = 0.0
+        self._tap_count  = 0
+        self._last_tap   = 0.0
+        self._last_action = 0.0
+        self.action_label = ""
+
+
+# ─────────────────────────────────────────────
+# ClapDetector
+# Detects a clap gesture using TWO hands:
+# both wrists come within CLAP_THRESHOLD px
+# of each other, then separate.
+# Triggers CLEAR on the clap release.
+# ─────────────────────────────────────────────
+CLAP_THRESHOLD  = 120   # px — max wrist-to-wrist distance to count as clap
+CLAP_COOLDOWN   = 1.5   # seconds between clap triggers
+
+class ClapDetector:
+    """
+    Detects a two-hand clap (both wrists close together then apart).
+    Returns 'CLEAR' on the release frame.
+    """
+    def __init__(self):
+        self._clapping    = False
+        self._last_clap   = 0.0
+        self.action_label       = ""
+        self._action_label_time = 0.0
+
+    def update(self, lms_list, fw, fh):
+        """
+        Parameters
+        ----------
+        lms_list : list of 2 landmark lists (from two detected hands)
+        fw, fh   : frame width / height
+
+        Returns
+        -------
+        'CLEAR' on clap release, else None
+        """
+        now    = time.time()
+        action = None
+
+        if len(lms_list) < 2:
+            self._clapping = False
+            if self.action_label and now - self._action_label_time > ACTION_LABEL_SECS:
+                self.action_label = ""
+            return None
+
+        # Use wrist (landmark 0) of each hand
+        w0 = lm_px(lms_list[0], 0, fw, fh)
+        w1 = lm_px(lms_list[1], 0, fw, fh)
+        dist = float(np.hypot(w0[0] - w1[0], w0[1] - w1[1]))
+
+        hands_close = dist < CLAP_THRESHOLD
+
+        if hands_close and not self._clapping:
+            self._clapping = True
+
+        elif not hands_close and self._clapping:
+            # Hands just separated — clap complete
+            self._clapping = False
+            if now - self._last_clap >= CLAP_COOLDOWN:
+                action = "CLEAR"
+                self._last_clap = now
+                self._set_label("CLAP! CLEARED")
+
+        if self.action_label and now - self._action_label_time > ACTION_LABEL_SECS:
+            self.action_label = ""
+
+        return action
+
+    def _set_label(self, text):
+        self.action_label       = text
+        self._action_label_time = time.time()
+
+    def reset(self):
+        self._clapping  = False
+        self._last_clap = 0.0
         self.action_label = ""
 
 
@@ -1604,8 +1730,10 @@ def main():
     single_debouncer = GestureDebouncer(GESTURE_DEBOUNCE_FRAMES)
     zoom_debouncer   = GestureDebouncer(GESTURE_DEBOUNCE_FRAMES)
     shape_detector   = ShapeDetector()
-    pinch_detector   = PinchActionDetector()   # tap/hold → UNDO/REDO/MOVE
-    undo_manager     = UndoRedoManager()       # canvas + 3D stroke history
+    pinch_detector      = PinchActionDetector()    # hold → MOVE only
+    two_finger_detector = TwoFingerTapDetector()   # tap/double-tap → UNDO/REDO
+    clap_detector       = ClapDetector()           # clap → CLEAR
+    undo_manager        = UndoRedoManager()        # canvas + 3D stroke history
 
     # ── Feature 1: Object detection + Blueprint ───────────────────────────
     obj_detector   = ObjectDetector()
@@ -1690,6 +1818,26 @@ def main():
             pinch1, _ = is_pinching(lms_list[1], fw, fh)
             raw_two    = "ZOOM" if (pinch0 and pinch1) else "IDLE"
             stable_two = zoom_debouncer.update(raw_two)
+
+            # Clap detection (runs every frame with two hands)
+            clap_action = clap_detector.update(lms_list, fw, fh)
+            if clap_action == "CLEAR":
+                base_canvas[:] = 0
+                strokes_3d     = []
+                current_stroke = None
+                z_history.clear()
+                offset_x, offset_y = 0, 0
+                scale_factor       = 1.0
+                zoom_target_scale  = 1.0
+                single_debouncer.reset()
+                zoom_debouncer.reset()
+                pinch_detector.reset()
+                two_finger_detector.reset()
+                undo_manager.reset()
+                shape_detector.reset()
+                pan_prev_wrist_x = None
+                pan_smooth_dx    = 0.0
+                print("[INFO] Canvas cleared by CLAP gesture.")
 
             if stable_two == "ZOOM":
                 mode = "ZOOM"
@@ -1870,16 +2018,7 @@ def main():
             elif mode == "DRAW":
                 in_pinch = False
                 _draw_cx, _draw_cy = 0, 0
-                pinch_action = pinch_detector.update(False)   # not pinching
-                # Tap actions while drawing (finger briefly pinched mid-stroke)
-                if pinch_action == "UNDO":
-                    base_canvas, strokes_3d = undo_manager.undo(
-                        base_canvas, strokes_3d)
-                    prev_x, prev_y = None, None
-                elif pinch_action == "REDO":
-                    base_canvas, strokes_3d = undo_manager.redo(
-                        base_canvas, strokes_3d)
-                    prev_x, prev_y = None, None
+                pinch_detector.update(False)   # not pinching (MOVE only)
 
                 if iy < 60:
                     # Hovering over UI bar
@@ -1946,19 +2085,37 @@ def main():
                 cv2.circle(frame, (ix, iy), 7, (255, 255, 255), 1)
 
             # ── CURSOR ────────────────────────────────────────
+            # Index + Middle up = CURSOR mode
+            # Tap both fingers down quickly = UNDO
+            # Double-tap = REDO
             elif mode == "CURSOR":
                 _draw_cx, _draw_cy = 0, 0
                 in_pinch = False
-                pinch_action = pinch_detector.update(False)
-                if pinch_action == "UNDO":
+                pinch_detector.update(False)   # not pinching
+
+                # Two-finger tap detection for UNDO / REDO
+                tap_action = two_finger_detector.update(landmarks)
+                if tap_action == "UNDO":
                     base_canvas, strokes_3d = undo_manager.undo(
                         base_canvas, strokes_3d)
-                elif pinch_action == "REDO":
+                elif tap_action == "REDO":
                     base_canvas, strokes_3d = undo_manager.redo(
                         base_canvas, strokes_3d)
+
                 prev_x, prev_y = None, None
-                cv2.circle(frame, (ix, iy), 12, (255, 200, 0), 2)
-                cv2.circle(frame, (ix, iy), 3,  (255, 200, 0), -1)
+
+                # Visual: hollow circle cursor + tap indicator
+                cursor_col = (255, 200, 0)
+                if two_finger_detector._down:
+                    cursor_col = (100, 255, 100)   # green flash when dipped
+                cv2.circle(frame, (ix, iy), 14, cursor_col, 2)
+                cv2.circle(frame, (ix, iy), 4,  cursor_col, -1)
+                # Show tap hint
+                cv2.putText(frame, "TAP=UNDO  DBL=REDO",
+                            (10, fh - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                            (200, 200, 100), 1, cv2.LINE_AA)
+
                 if current_stroke is not None and len(current_stroke) > 0:
                     strokes_3d.append(current_stroke)
                     undo_manager.snapshot(base_canvas, strokes_3d)
@@ -1968,11 +2125,10 @@ def main():
             else:
                 _draw_cx, _draw_cy = 0, 0
                 in_pinch = False
-                pinch_action = pinch_detector.update(False)
-                if pinch_action == "UNDO":
-                    base_canvas, strokes_3d = undo_manager.undo(
-                        base_canvas, strokes_3d)
-                elif pinch_action == "REDO":
+                _idle_pinch = pinch_detector.update(False)
+                if False:  # UNDO/REDO now handled by two_finger_detector in CURSOR
+                    pass
+                elif False:
                     base_canvas, strokes_3d = undo_manager.redo(
                         base_canvas, strokes_3d)
                 prev_x, prev_y = None, None
@@ -2062,11 +2218,15 @@ def main():
         curr_time = time.time()
         fps = 1.0 / max(curr_time - prev_time, 1e-6)
         prev_time = curr_time
+        # Combine action labels: pinch > two-finger > clap
+        _action_lbl = (pinch_detector.action_label or
+                       two_finger_detector.action_label or
+                       clap_detector.action_label)
         frame = draw_ui(frame, current_color_idx, current_brush_idx,
                         mode, fps, scale_factor,
                         shape_label=shape_detector.label,
                         depth_enabled=depth_enabled,
-                        action_label=pinch_detector.action_label)
+                        action_label=_action_lbl)
 
         cv2.imshow(
             "Hand Gesture Drawing  [d=3D  c=clear  s=save  q=quit]", frame)
@@ -2114,6 +2274,8 @@ def main():
             single_debouncer.reset()
             zoom_debouncer.reset()
             pinch_detector.reset()
+            two_finger_detector.reset()
+            clap_detector.reset()
             undo_manager.reset()
             shape_detector.reset()
             pan_prev_wrist_x = None
