@@ -271,7 +271,9 @@ def get_gesture_mode(fingers, landmarks, w, h):
     """
     thumb, index, middle, ring, pinky = fingers
 
-    # 1. (Palm eraser removed as requested)
+    # 1. Three fingers (index, middle, ring) → ERASE
+    if index and middle and ring and not pinky and not thumb:
+        return "ERASE"
 
     # 2. Pinch (thumb+index close, middle/ring/pinky folded) → MOVE
     pinching, _ = is_pinching(landmarks, w, h)
@@ -2779,9 +2781,40 @@ def main():
             ix, iy = int(smooth_x), int(smooth_y)
             smooth_thumb_x = float(thumb_tip[0])
             smooth_thumb_y = float(thumb_tip[1])
+            ix, iy = int(smooth_x), int(smooth_y)
+
+            # ── ERASE (Three-finger) ──────────────────────────
+            if mode == "ERASE":
+                _draw_cx, _draw_cy = 0, 0
+                pinch_detector.update(False)
+
+                # Use current brush size as base for eraser, but make it larger for utility
+                e_size = BRUSH_SIZES[current_brush_idx] * 2
+                
+                # Canvas-space coordinates for erasing
+                ccx, ccy = screen_to_canvas(
+                    ix, iy, fw, fh, cw, ch,
+                    offset_x, offset_y, scale_factor)
+                
+                # Perform the erase on base_canvas
+                cv2.circle(base_canvas, (ccx, ccy), int(e_size / scale_factor), (0, 0, 0), -1)
+                
+                # Visual feedback on camera frame
+                cv2.circle(frame, (ix, iy), e_size, (100, 100, 255), 2)
+                cv2.putText(frame, f"ERASER: {e_size}px",
+                            (ix - 40, iy - e_size - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 255), 1, cv2.LINE_AA)
+
+                # Finish any active draw stroke before erasing
+                if stroke_mgr.active_stroke is not None:
+                    s = stroke_mgr.finish_draw()
+                    if s:
+                        stroke_snap()
+                        stroke_mgr.render(base_canvas)
+                undo_manager.snapshot(base_canvas, strokes_3d)
 
             # ── MOVE ──────────────────────────────────────────
-            if mode == "MOVE":
+            elif mode == "MOVE":
                 _draw_cx, _draw_cy = 0, 0
                 pinching_now, _ = is_pinching(landmarks, fw, fh)
                 pinch_action = pinch_detector.update(pinching_now)
