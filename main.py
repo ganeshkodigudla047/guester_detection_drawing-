@@ -142,8 +142,10 @@ BRUSH_BTN_W      = 50
 BRUSH_BTN_H      = 40
 
 # ── Trash bin button ──────────────────────────────────────────────────────
-TRASH_BTN_W      = 50
+# Positioned in the gap between color buttons and brush size buttons
+TRASH_BTN_W      = 54
 TRASH_BTN_H      = 40
+TRASH_BTN_X      = 648   # sits in the gap: color ends ~640, brush starts ~720
 TRASH_BTN_Y      = 10
 TRASH_DWELL_SECS = 0.8   # hover this long to trigger delete
 
@@ -1699,67 +1701,75 @@ def draw_ui(frame, current_color_idx, current_brush_idx,
                    (bx + BRUSH_BTN_W // 2, by + BRUSH_BTN_H // 2),
                    size, (200, 200, 200), -1)
 
-    # ── Trash bin button (top-centre) ─────────────────────────────────────
-    trash_cx = w // 2
-    trash_bx = trash_cx - TRASH_BTN_W // 2
+    # ── Trash bin button (between color and brush buttons) ────────────────
+    trash_bx = TRASH_BTN_X
     trash_by = TRASH_BTN_Y
 
-    # Background — red if selection active, dark grey otherwise
+    # Background — bright red if selection active, dark red otherwise
     if trash_has_selection:
-        trash_bg = (30, 30, 180)   # dark red (BGR)
-        trash_fg = (80, 80, 255)   # bright red
+        trash_bg  = (0, 0, 200)     # bright red (BGR)
+        trash_fg  = (80, 80, 255)   # light red for icon
+        trash_bdr = (0, 0, 255)
     else:
-        trash_bg = (50, 50, 50)
-        trash_fg = (160, 160, 160)
+        trash_bg  = (40, 40, 40)
+        trash_fg  = (180, 180, 180)
+        trash_bdr = (120, 120, 120)
 
+    # Button background
     cv2.rectangle(frame,
                   (trash_bx, trash_by),
                   (trash_bx + TRASH_BTN_W, trash_by + TRASH_BTN_H),
                   trash_bg, -1)
 
-    # Draw trash can icon using OpenCV primitives
-    # Can body
-    bx0 = trash_bx + 10
-    by0 = trash_by + 14
-    bw  = TRASH_BTN_W - 20
-    bh  = TRASH_BTN_H - 18
+    # ── Draw trash can icon ───────────────────────────────────────────────
+    # Can body (rectangle)
+    bx0 = trash_bx + 9
+    by0 = trash_by + 15
+    bw  = TRASH_BTN_W - 18
+    bh  = TRASH_BTN_H - 20
     cv2.rectangle(frame, (bx0, by0), (bx0 + bw, by0 + bh), trash_fg, 2)
-    # Lid
+    # Lid (wider than body)
     cv2.rectangle(frame,
-                  (bx0 - 2, by0 - 5),
-                  (bx0 + bw + 2, by0 - 1),
+                  (bx0 - 3, by0 - 5),
+                  (bx0 + bw + 3, by0 - 1),
                   trash_fg, 2)
     # Handle on lid
     hx = trash_bx + TRASH_BTN_W // 2
-    cv2.rectangle(frame, (hx - 5, by0 - 9), (hx + 5, by0 - 5), trash_fg, 2)
-    # Vertical lines inside can (stripes)
+    cv2.rectangle(frame, (hx - 5, by0 - 10), (hx + 5, by0 - 5), trash_fg, 2)
+    # Vertical stripes inside can
     for lx in [bx0 + bw // 4, bx0 + bw // 2, bx0 + 3 * bw // 4]:
         cv2.line(frame, (lx, by0 + 3), (lx, by0 + bh - 3), trash_fg, 1)
 
-    # Dwell progress arc around the button
+    # Dwell progress arc
     if trash_hover_progress > 0:
         angle = int(360 * trash_hover_progress)
         cx_t  = trash_bx + TRASH_BTN_W // 2
         cy_t  = trash_by + TRASH_BTN_H // 2
+        arc_col = (0, 0, 255) if trash_has_selection else (0, 200, 255)
         cv2.ellipse(frame,
                     (cx_t, cy_t),
-                    (TRASH_BTN_W // 2 + 4, TRASH_BTN_H // 2 + 4),
-                    -90, 0, angle,
-                    (80, 80, 255) if trash_has_selection else (200, 200, 80),
-                    3)
+                    (TRASH_BTN_W // 2 + 5, TRASH_BTN_H // 2 + 5),
+                    -90, 0, angle, arc_col, 3)
 
-    # Border
-    border_col = (80, 80, 255) if trash_has_selection else (100, 100, 100)
+    # Button border
     cv2.rectangle(frame,
                   (trash_bx - 1, trash_by - 1),
                   (trash_bx + TRASH_BTN_W + 1, trash_by + TRASH_BTN_H + 1),
-                  border_col, 1)
+                  trash_bdr, 2)
 
-    # Label below icon
+    # "DEL" label below button
     cv2.putText(frame, "DEL",
-                (trash_bx + 8, trash_by + TRASH_BTN_H + 12),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                (trash_bx + 10, trash_by + TRASH_BTN_H + 13),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42,
                 trash_fg, 1, cv2.LINE_AA)
+
+    # Tooltip when hovering
+    if trash_hover_progress > 0:
+        tip = "DELETE SELECTED" if trash_has_selection else "DELETE LAST"
+        cv2.putText(frame, tip,
+                    (trash_bx - 20, trash_by - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                    (0, 200, 255), 1, cv2.LINE_AA)
 
     # Mode label
     mode_colors = {
@@ -1853,10 +1863,8 @@ def check_ui_click(ix, iy, current_color_idx, current_brush_idx):
 
 def is_over_trash(ix, iy, frame_w):
     """Return True when finger tip (ix, iy) is hovering over the trash bin button."""
-    trash_bx = frame_w // 2 - TRASH_BTN_W // 2
-    trash_by = TRASH_BTN_Y
-    return (trash_bx <= ix <= trash_bx + TRASH_BTN_W and
-            trash_by <= iy <= trash_by + TRASH_BTN_H)
+    return (TRASH_BTN_X <= ix <= TRASH_BTN_X + TRASH_BTN_W and
+            TRASH_BTN_Y <= iy <= TRASH_BTN_Y + TRASH_BTN_H)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ██  FEATURE 1 — OBJECT DETECTION + BLUEPRINT MODE
