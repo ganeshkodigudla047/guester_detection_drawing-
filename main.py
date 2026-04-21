@@ -271,9 +271,7 @@ def get_gesture_mode(fingers, landmarks, w, h):
     """
     thumb, index, middle, ring, pinky = fingers
 
-    # 1. Full palm (all 5 fingers extended) → ERASE
-    if thumb and index and middle and ring and pinky:
-        return "ERASE"
+    # 1. (Palm eraser removed as requested)
 
     # 2. Pinch (thumb+index close, middle/ring/pinky folded) → MOVE
     pinching, _ = is_pinching(landmarks, w, h)
@@ -2011,7 +2009,7 @@ def is_over_panel(ix, iy):
 # Trash bin geometry (top-centre of frame)
 DRAG_TRASH_W    = 80    # hit-box width  (px)
 DRAG_TRASH_H    = 80    # hit-box height (px)
-DRAG_TRASH_Y    = 20    # distance from top of frame
+DRAG_TRASH_Y    = 50    # distance from top of frame (as requested)
 
 def _drag_trash_rect(frame_w):
     """Return (x1, y1, x2, y2) of the drag-to-delete trash bin."""
@@ -2093,37 +2091,28 @@ def draw_trash_icon(frame, is_hovering):
                 1, cv2.LINE_AA)
 
 
-def is_hovering_trash(fx, fy, frame_w):
+def is_hovering_trash(x, y, frame_w):
     """
-    Return True when finger/pinch point (fx, fy) is inside the trash bin.
+    Return True when finger/pinch point (x, y) is inside the trash bin.
 
     Parameters
     ----------
-    fx, fy   : screen-space finger coordinates
+    x, y     : screen-space finger coordinates
     frame_w  : frame width (used to compute bin centre)
     """
     x1, y1, x2, y2 = _drag_trash_rect(frame_w)
-    return x1 <= fx <= x2 and y1 <= fy <= y2
+    return x1 <= x <= x2 and y1 <= y <= y2
 
 
-def delete_stroke(stroke_mgr_obj, selected_id):
+def delete_stroke(strokes_list, selected_id):
     """
-    Remove the stroke with `selected_id` from stroke_mgr_obj.strokes.
-    Deselects and returns True if deleted, False if not found.
+    Remove the stroke with `selected_id` from the provided list.
+    Returns the new list without the deleted stroke.
 
-    Parameters
-    ----------
-    stroke_mgr_obj : StrokeManager instance
-    selected_id    : id attribute of the Stroke2D to remove
-                     (uses index if id not available)
+    Example:
+    strokes = [s for s in strokes if s["id"] != selected_id]
     """
-    before = len(stroke_mgr_obj.strokes)
-    stroke_mgr_obj.strokes = [
-        s for s in stroke_mgr_obj.strokes
-        if id(s) != selected_id
-    ]
-    stroke_mgr_obj.selected_idx = -1
-    return len(stroke_mgr_obj.strokes) < before
+    return [s for s in strokes_list if id(s) != selected_id]
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ██  FEATURE 1 — OBJECT DETECTION + BLUEPRINT MODE
@@ -2488,9 +2477,11 @@ def main():
     trash_hovering    = False  # True while finger is over trash bin
 
     # ── Drag-to-delete state ──────────────────────────────────────────────
-    drag_trash_visible  = False   # show top-centre trash only while dragging
+    drag_trash_visible  = True    # Permanently visible as requested
     drag_trash_hovering = False   # finger is over the drag-trash bin
     drag_trash_obj_id   = -1      # Python id() of the stroke being dragged
+    drag_trash_visible_prev  = False
+    drag_trash_hovering_prev = False
 
     # ── Stroke undo/redo helpers (closures over stroke_mgr stacks) ────────
     def stroke_snap():
@@ -2757,6 +2748,9 @@ def main():
             zoom_initial_dist = None
             zoom_debouncer.reset()
 
+            # Reset drag trash hover state at start of hand processing
+            drag_trash_hovering = False
+
             hand_lms  = results.multi_hand_landmarks[0]
             landmarks = hand_lms.landmark
 
@@ -2765,6 +2759,10 @@ def main():
                 mp_styles.get_default_hand_landmarks_style(),
                 mp_styles.get_default_hand_connections_style(),
             )
+
+            # Calculate trash bin hover state for visual feedback (all modes)
+            ix_raw, iy_raw = lm_px(landmarks, 8, fw, fh) # raw index tip
+            drag_trash_hovering = is_hovering_trash(ix_raw, iy_raw, fw)
 
             fingers  = detect_fingers(landmarks, fw, fh)
             raw_mode = get_gesture_mode(fingers, landmarks, fw, fh)
@@ -2782,83 +2780,11 @@ def main():
             smooth_thumb_x = float(thumb_tip[0])
             smooth_thumb_y = float(thumb_tip[1])
 
-            # ── ERASE ─────────────────────────────────────────
-            if mode == "ERASE":
-                _draw_cx, _draw_cy = 0, 0
-                pinch_detector.update(False)
-
-                # Feature 2: Canvas Pan -- open palm moving sideways = pan
-                wrist_x = lm_px(landmarks, 0, fw, fh)[0]
-                if pan_prev_wrist_x is not None:
-                    _raw_dx, pan_smooth_dx = calculate_dx(
-                        pan_prev_wrist_x, wrist_x, pan_smooth_dx)
-                    _is_panning = abs(pan_smooth_dx) > PAN_THRESHOLD
-                else:
-                    _is_panning = False
-                pan_prev_wrist_x = wrist_x
-
-                if _is_panning:
-                    # Shift canvas horizontally
-                    base_canvas = shift_canvas(base_canvas, int(pan_smooth_dx))
-                    cv2.putText(frame, "PAN MODE",
-                                (fw // 2 - 70, fh // 2),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.1,
-                                (0, 255, 200), 2, cv2.LINE_AA)
-                    _arrow = ">>" if pan_smooth_dx > 0 else "<<"
-                    cv2.putText(frame, _arrow,
-                                (fw // 2 - 30, fh // 2 + 45),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.3,
-                                (0, 255, 200), 2, cv2.LINE_AA)
-                else:
-                    # Normal erase
-                    palm_pts = [lm_px(landmarks, i, fw, fh)
-                                for i in [0, 4, 8, 12, 16, 20]]
-                    pcx = int(np.mean([p[0] for p in palm_pts]))
-                    pcy = int(np.mean([p[1] for p in palm_pts]))
-                    ccx, ccy = screen_to_canvas(
-                        pcx, pcy, fw, fh, cw, ch,
-                        offset_x, offset_y, scale_factor)
-                    er = max(1, int(ERASER_RADIUS / scale_factor))
-                    cv2.circle(base_canvas, (ccx, ccy), er, (0, 0, 0), -1)
-                    cv2.circle(frame, (pcx, pcy), ERASER_RADIUS, (0, 100, 255), 2)
-                    cv2.putText(frame, "ERASING",
-                                (pcx - 35, pcy - ERASER_RADIUS - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2)
-                # Finish any active draw stroke before erasing
-                if stroke_mgr.active_stroke is not None:
-                    s = stroke_mgr.finish_draw()
-                    if s:
-                        stroke_snap()
-                prev_x, prev_y     = None, None
-                smooth_x, smooth_y = None, None   # reset so DRAW re-entry snaps to finger
-                in_pinch = False
-                # Erase nearby 3D strokes whose projected centroid is in range
-                if depth_enabled and strokes_3d:
-                    proj_all = [
-                        project_3D_to_2D(s.points, R_cam, t_cam,
-                                         FOCAL_LENGTH_X, FOCAL_LENGTH_Y,
-                                         cx_cam, cy_cam)
-                        for s in strokes_3d
-                    ]
-                    keep = []
-                    for s_idx, stroke in enumerate(strokes_3d):
-                        pts_p = [p for p in proj_all[s_idx] if p is not None]
-                        if not pts_p:
-                            keep.append(stroke)
-                            continue
-                        cx_s = int(np.mean([p[0] for p in pts_p]))
-                        cy_s = int(np.mean([p[1] for p in pts_p]))
-                        if np.hypot(cx_s - pcx, cy_s - pcy) > ERASER_RADIUS * 1.5:
-                            keep.append(stroke)
-                    strokes_3d = keep
-                if current_stroke is not None and len(current_stroke) > 0:
-                    strokes_3d.append(current_stroke)
-                current_stroke = None
-
             # ── MOVE ──────────────────────────────────────────
-            elif mode == "MOVE":
+            if mode == "MOVE":
                 _draw_cx, _draw_cy = 0, 0
-                pinch_action = pinch_detector.update(True)
+                pinching_now, _ = is_pinching(landmarks, fw, fh)
+                pinch_action = pinch_detector.update(pinching_now)
 
                 # Finish any active draw stroke
                 if stroke_mgr.active_stroke is not None:
@@ -2925,8 +2851,6 @@ def main():
                     # Hold threshold not yet crossed
                     in_pinch         = False
                     obj_drag_started = False
-                    drag_trash_visible  = False
-                    drag_trash_hovering = False
 
                 # Visual feedback
                 cv2.circle(frame, (mid_x, mid_y), 14, (255, 100, 0), -1)
@@ -3150,12 +3074,12 @@ def main():
 
             if mode != "MOVE" and obj_drag_active:
                 # Drag ended — check if dropped on trash bin
-                if drag_trash_visible and drag_trash_hovering and stroke_mgr.selected_idx >= 0:
+                if drag_trash_visible_prev and drag_trash_hovering_prev and stroke_mgr.selected_idx >= 0:
                     stroke_snap()
-                    deleted = delete_stroke(stroke_mgr, drag_trash_obj_id)
-                    if deleted:
-                        stroke_mgr.render(base_canvas)
-                        print("[INFO] Stroke deleted by drag-to-trash.")
+                    stroke_mgr.strokes = delete_stroke(stroke_mgr.strokes, drag_trash_obj_id)
+                    stroke_mgr.selected_idx = -1
+                    stroke_mgr.render(base_canvas)
+                    print("[INFO] Stroke deleted by drag-to-trash.")
                     # Flash feedback
                     cv2.putText(frame, "DELETED!",
                                 (fw // 2 - 60, fh // 2),
@@ -3164,9 +3088,6 @@ def main():
                 else:
                     stroke_mgr.end_drag()
                     stroke_snap()
-                drag_trash_visible  = False
-                drag_trash_hovering = False
-                drag_trash_obj_id   = -1
                 obj_drag_active  = False
                 obj_drag_started = False
 
@@ -3195,9 +3116,7 @@ def main():
         frame = render_canvas(frame, base_canvas,
                               offset_x, offset_y, scale_factor)
 
-        # ── Drag-to-delete trash bin (shown only while dragging a stroke) ─
-        if drag_trash_visible:
-            draw_trash_icon(frame, drag_trash_hovering)
+        # (Moved trash bin drawing to the very end to ensure visibility)
 
         # ── Feature 1: Object detection + Blueprint overlay ───────────────
         if detections:
@@ -3278,6 +3197,13 @@ def main():
                         action_label=_action_lbl,
                         trash_hover_progress=_trash_prog,
                         trash_has_selection=(stroke_mgr.selected_idx >= 0))
+
+        # ── Drag-to-delete trash bin (Permanently visible) ────────────────
+        draw_trash_icon(frame, drag_trash_hovering)
+
+        # Store state for next frame's drag-end check
+        drag_trash_visible_prev  = True
+        drag_trash_hovering_prev = drag_trash_hovering
 
         cv2.imshow(
             "Hand Gesture Drawing  [d=3D  c=clear  s=save  q=quit]", frame)
