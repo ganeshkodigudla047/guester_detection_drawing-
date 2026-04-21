@@ -129,25 +129,47 @@ COLORS = {
 }
 COLOR_NAMES = list(COLORS.keys())
 
-# UI layout
-COLOR_BTN_W      = 80
-COLOR_BTN_H      = 40
-COLOR_BTN_Y      = 10
-COLOR_BTN_MARGIN = 10
+# ── Floating side panel UI ───────────────────────────────────────────────
+# Large panel on the LEFT side of the camera feed.
+# All buttons work with mouse click AND hand gesture hover/dwell.
 
+PANEL_X          = 10     # panel left edge
+PANEL_Y          = 10     # panel top edge
+PANEL_W          = 110    # panel width
+PANEL_ALPHA      = 0.82   # panel background transparency
+
+# Color buttons (circular, stacked vertically)
+COLOR_BTN_R      = 22     # radius of each color circle
+COLOR_BTN_GAP    = 8      # gap between circles
+COLOR_BTN_X      = PANEL_X + PANEL_W // 2   # centre x of color column
+
+# Brush size buttons
 BRUSH_SIZES      = [3, 6, 10, 16]
-BRUSH_BTN_X_START = 720
-BRUSH_BTN_Y      = 10
-BRUSH_BTN_W      = 50
-BRUSH_BTN_H      = 40
+BRUSH_BTN_W      = 90
+BRUSH_BTN_H      = 32
+BRUSH_BTN_X      = PANEL_X + 10
+BRUSH_BTN_GAP    = 6
 
-# ── Trash bin button ──────────────────────────────────────────────────────
-# Positioned in the gap between color buttons and brush size buttons
-TRASH_BTN_W      = 54
-TRASH_BTN_H      = 40
-TRASH_BTN_X      = 648   # sits in the gap: color ends ~640, brush starts ~720
-TRASH_BTN_Y      = 10
-TRASH_DWELL_SECS = 0.8   # hover this long to trigger delete
+# Action buttons (Undo, Redo, Clear, Save)
+ACTION_BTN_W     = 90
+ACTION_BTN_H     = 32
+ACTION_BTN_X     = PANEL_X + 10
+ACTION_BTN_GAP   = 6
+
+# Trash bin button
+TRASH_BTN_W      = 90
+TRASH_BTN_H      = 36
+TRASH_BTN_X      = PANEL_X + 10
+TRASH_DWELL_SECS = 0.8
+
+# Legacy aliases (keep old code working)
+COLOR_BTN_W      = BRUSH_BTN_W
+COLOR_BTN_H      = BRUSH_BTN_H
+COLOR_BTN_Y      = PANEL_Y
+COLOR_BTN_MARGIN = COLOR_BTN_GAP
+BRUSH_BTN_X_START = BRUSH_BTN_X
+BRUSH_BTN_Y      = PANEL_Y
+TRASH_BTN_Y      = PANEL_Y
 
 
 
@@ -1665,206 +1687,321 @@ def draw_ui(frame, current_color_idx, current_brush_idx,
             mode, fps, scale_factor, shape_label="",
             depth_enabled=False, action_label="",
             trash_hover_progress=0.0, trash_has_selection=False):
+    """
+    Draw the floating left-side control panel over the camera frame.
+    All buttons are large and work with mouse click or hand gesture dwell.
+    """
     h, w = frame.shape[:2]
 
-    # Semi-transparent top bar
-    bar = frame.copy()
-    cv2.rectangle(bar, (0, 0), (w, 60), (30, 30, 30), -1)
-    cv2.addWeighted(bar, 0.6, frame, 0.4, 0, frame)
+    # ── Compute panel height dynamically ─────────────────────────────────
+    n_colors  = len(COLOR_NAMES)
+    n_brushes = len(BRUSH_SIZES)
+    n_actions = 4   # Undo, Redo, Clear, Save
 
-    # Color buttons
+    # Section heights
+    sec_title_h  = 22
+    color_sec_h  = sec_title_h + n_colors * (COLOR_BTN_R * 2 + COLOR_BTN_GAP) + 8
+    brush_sec_h  = sec_title_h + n_brushes * (BRUSH_BTN_H + BRUSH_BTN_GAP) + 8
+    action_sec_h = sec_title_h + n_actions * (ACTION_BTN_H + ACTION_BTN_GAP) + 8
+    trash_sec_h  = TRASH_BTN_H + 12
+    panel_h      = color_sec_h + brush_sec_h + action_sec_h + trash_sec_h + 16
+
+    # ── Semi-transparent panel background ────────────────────────────────
+    overlay = frame.copy()
+    cv2.rectangle(overlay,
+                  (PANEL_X - 4, PANEL_Y - 4),
+                  (PANEL_X + PANEL_W + 4, PANEL_Y + panel_h + 4),
+                  (20, 20, 20), -1)
+    cv2.addWeighted(overlay, PANEL_ALPHA, frame, 1 - PANEL_ALPHA, 0, frame)
+
+    # Panel border
+    cv2.rectangle(frame,
+                  (PANEL_X - 4, PANEL_Y - 4),
+                  (PANEL_X + PANEL_W + 4, PANEL_Y + panel_h + 4),
+                  (80, 80, 80), 1)
+
+    cy = PANEL_Y + 8   # current y cursor
+
+    # ── Section: COLORS ───────────────────────────────────────────────────
+    cv2.putText(frame, "COLOR", (PANEL_X + 28, cy + 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 180, 180), 1)
+    cy += sec_title_h
+
     for i, name in enumerate(COLOR_NAMES):
-        bx = COLOR_BTN_MARGIN + i * (COLOR_BTN_W + COLOR_BTN_MARGIN)
-        by = COLOR_BTN_Y
-        cv2.rectangle(frame, (bx, by),
-                      (bx + COLOR_BTN_W, by + COLOR_BTN_H),
-                      COLORS[name], -1)
+        cx_btn = COLOR_BTN_X
+        cy_btn = cy + COLOR_BTN_R
+        col    = COLORS[name]
+
+        # Circle fill
+        cv2.circle(frame, (cx_btn, cy_btn), COLOR_BTN_R, col, -1)
+
+        # Selection ring
         if i == current_color_idx:
-            cv2.rectangle(frame, (bx - 2, by - 2),
-                          (bx + COLOR_BTN_W + 2, by + COLOR_BTN_H + 2),
-                          (255, 255, 255), 2)
-        cv2.putText(frame, name[:3], (bx + 5, by + 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+            cv2.circle(frame, (cx_btn, cy_btn), COLOR_BTN_R + 4,
+                       (255, 255, 255), 2)
+            cv2.circle(frame, (cx_btn, cy_btn), COLOR_BTN_R + 7,
+                       (200, 200, 200), 1)
+        else:
+            cv2.circle(frame, (cx_btn, cy_btn), COLOR_BTN_R + 2,
+                       (80, 80, 80), 1)
 
-    # Brush size buttons
-    for i, size in enumerate(BRUSH_SIZES):
-        bx = BRUSH_BTN_X_START + i * (BRUSH_BTN_W + COLOR_BTN_MARGIN)
-        by = BRUSH_BTN_Y
+        # Color name label to the right
+        cv2.putText(frame, name[:4],
+                    (cx_btn + COLOR_BTN_R + 6, cy_btn + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                    (200, 200, 200) if i != current_color_idx else (255, 255, 255),
+                    1)
+
+        cy += COLOR_BTN_R * 2 + COLOR_BTN_GAP
+
+    cy += 8
+
+    # ── Section: BRUSH SIZE ───────────────────────────────────────────────
+    cv2.putText(frame, "SIZE", (PANEL_X + 32, cy + 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 180, 180), 1)
+    cy += sec_title_h
+
+    size_labels = ["S", "M", "L", "XL"]
+    for i, (size, lbl) in enumerate(zip(BRUSH_SIZES, size_labels)):
+        bx = BRUSH_BTN_X
+        by = cy
+        is_sel = (i == current_brush_idx)
+        bg_col = (60, 60, 60) if not is_sel else (80, 120, 80)
         cv2.rectangle(frame, (bx, by),
-                      (bx + BRUSH_BTN_W, by + BRUSH_BTN_H),
-                      (80, 80, 80), -1)
-        if i == current_brush_idx:
-            cv2.rectangle(frame, (bx - 2, by - 2),
-                          (bx + BRUSH_BTN_W + 2, by + BRUSH_BTN_H + 2),
-                          (255, 255, 255), 2)
-        cv2.circle(frame,
-                   (bx + BRUSH_BTN_W // 2, by + BRUSH_BTN_H // 2),
-                   size, (200, 200, 200), -1)
+                      (bx + BRUSH_BTN_W, by + BRUSH_BTN_H), bg_col, -1)
+        if is_sel:
+            cv2.rectangle(frame, (bx - 1, by - 1),
+                          (bx + BRUSH_BTN_W + 1, by + BRUSH_BTN_H + 1),
+                          (100, 220, 100), 2)
+        else:
+            cv2.rectangle(frame, (bx, by),
+                          (bx + BRUSH_BTN_W, by + BRUSH_BTN_H),
+                          (70, 70, 70), 1)
 
-    # ── Trash bin button (between color and brush buttons) ────────────────
-    trash_bx = TRASH_BTN_X
-    trash_by = TRASH_BTN_Y
+        # Dot preview
+        dot_x = bx + 18
+        dot_y = by + BRUSH_BTN_H // 2
+        cv2.circle(frame, (dot_x, dot_y), min(size, 10), (200, 200, 200), -1)
 
-    # Background — bright red if selection active, dark red otherwise
+        # Label
+        cv2.putText(frame, lbl,
+                    (bx + 34, by + BRUSH_BTN_H // 2 + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255) if is_sel else (180, 180, 180), 1)
+        cv2.putText(frame, f"{size}px",
+                    (bx + 55, by + BRUSH_BTN_H // 2 + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                    (160, 160, 160), 1)
+
+        cy += BRUSH_BTN_H + BRUSH_BTN_GAP
+
+    cy += 8
+
+    # ── Section: ACTIONS ──────────────────────────────────────────────────
+    cv2.putText(frame, "ACTIONS", (PANEL_X + 18, cy + 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 180, 180), 1)
+    cy += sec_title_h
+
+    actions = [
+        ("UNDO",  (60, 60, 100), (120, 120, 220)),
+        ("REDO",  (60, 100, 60), (120, 220, 120)),
+        ("CLEAR", (80, 60, 60),  (200, 100, 100)),
+        ("SAVE",  (60, 80, 60),  (100, 200, 100)),
+    ]
+    for (lbl, bg, fg) in actions:
+        bx = ACTION_BTN_X
+        by = cy
+        cv2.rectangle(frame, (bx, by),
+                      (bx + ACTION_BTN_W, by + ACTION_BTN_H), bg, -1)
+        cv2.rectangle(frame, (bx, by),
+                      (bx + ACTION_BTN_W, by + ACTION_BTN_H), fg, 1)
+        (tw, th), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
+        cv2.putText(frame, lbl,
+                    (bx + (ACTION_BTN_W - tw) // 2, by + ACTION_BTN_H // 2 + th // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, fg, 1, cv2.LINE_AA)
+        cy += ACTION_BTN_H + ACTION_BTN_GAP
+
+    cy += 4
+
+    # ── Trash bin ─────────────────────────────────────────────────────────
+    bx = TRASH_BTN_X
+    by = cy
     if trash_has_selection:
-        trash_bg  = (0, 0, 200)     # bright red (BGR)
-        trash_fg  = (80, 80, 255)   # light red for icon
-        trash_bdr = (0, 0, 255)
+        t_bg = (30, 30, 160); t_fg = (80, 80, 255); t_bdr = (0, 0, 255)
     else:
-        trash_bg  = (40, 40, 40)
-        trash_fg  = (180, 180, 180)
-        trash_bdr = (120, 120, 120)
+        t_bg = (50, 50, 50);  t_fg = (160, 160, 160); t_bdr = (100, 100, 100)
 
-    # Button background
-    cv2.rectangle(frame,
-                  (trash_bx, trash_by),
-                  (trash_bx + TRASH_BTN_W, trash_by + TRASH_BTN_H),
-                  trash_bg, -1)
+    cv2.rectangle(frame, (bx, by),
+                  (bx + TRASH_BTN_W, by + TRASH_BTN_H), t_bg, -1)
+    cv2.rectangle(frame, (bx, by),
+                  (bx + TRASH_BTN_W, by + TRASH_BTN_H), t_bdr, 2)
 
-    # ── Draw trash can icon ───────────────────────────────────────────────
-    # Can body (rectangle)
-    bx0 = trash_bx + 9
-    by0 = trash_by + 15
-    bw  = TRASH_BTN_W - 18
-    bh  = TRASH_BTN_H - 20
-    cv2.rectangle(frame, (bx0, by0), (bx0 + bw, by0 + bh), trash_fg, 2)
-    # Lid (wider than body)
-    cv2.rectangle(frame,
-                  (bx0 - 3, by0 - 5),
-                  (bx0 + bw + 3, by0 - 1),
-                  trash_fg, 2)
-    # Handle on lid
-    hx = trash_bx + TRASH_BTN_W // 2
-    cv2.rectangle(frame, (hx - 5, by0 - 10), (hx + 5, by0 - 5), trash_fg, 2)
-    # Vertical stripes inside can
-    for lx in [bx0 + bw // 4, bx0 + bw // 2, bx0 + 3 * bw // 4]:
-        cv2.line(frame, (lx, by0 + 3), (lx, by0 + bh - 3), trash_fg, 1)
+    # Trash icon
+    ix0 = bx + 12; iy0 = by + 10
+    cv2.rectangle(frame, (ix0, iy0 + 6), (ix0 + 18, iy0 + 20), t_fg, 2)
+    cv2.rectangle(frame, (ix0 - 2, iy0 + 2), (ix0 + 20, iy0 + 6), t_fg, 2)
+    cv2.rectangle(frame, (ix0 + 5, iy0 - 2), (ix0 + 13, iy0 + 2), t_fg, 2)
+    for lx in [ix0 + 5, ix0 + 9, ix0 + 13]:
+        cv2.line(frame, (lx, iy0 + 8), (lx, iy0 + 18), t_fg, 1)
 
-    # Dwell progress arc
+    # Label
+    lbl_del = "DEL SELECTED" if trash_has_selection else "DEL LAST"
+    cv2.putText(frame, lbl_del,
+                (bx + 34, by + TRASH_BTN_H // 2 + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.36, t_fg, 1, cv2.LINE_AA)
+
+    # Dwell arc
     if trash_hover_progress > 0:
         angle = int(360 * trash_hover_progress)
-        cx_t  = trash_bx + TRASH_BTN_W // 2
-        cy_t  = trash_by + TRASH_BTN_H // 2
-        arc_col = (0, 0, 255) if trash_has_selection else (0, 200, 255)
-        cv2.ellipse(frame,
-                    (cx_t, cy_t),
+        cx_t  = bx + TRASH_BTN_W // 2
+        cy_t  = by + TRASH_BTN_H // 2
+        cv2.ellipse(frame, (cx_t, cy_t),
                     (TRASH_BTN_W // 2 + 5, TRASH_BTN_H // 2 + 5),
-                    -90, 0, angle, arc_col, 3)
+                    -90, 0, angle,
+                    (0, 0, 255) if trash_has_selection else (0, 200, 255), 3)
 
-    # Button border
-    cv2.rectangle(frame,
-                  (trash_bx - 1, trash_by - 1),
-                  (trash_bx + TRASH_BTN_W + 1, trash_by + TRASH_BTN_H + 1),
-                  trash_bdr, 2)
+    cy += TRASH_BTN_H + 8
 
-    # "DEL" label below button
-    cv2.putText(frame, "DEL",
-                (trash_bx + 10, trash_by + TRASH_BTN_H + 13),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                trash_fg, 1, cv2.LINE_AA)
-
-    # Tooltip when hovering
-    if trash_hover_progress > 0:
-        tip = "DELETE SELECTED" if trash_has_selection else "DELETE LAST"
-        cv2.putText(frame, tip,
-                    (trash_bx - 20, trash_by - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                    (0, 200, 255), 1, cv2.LINE_AA)
-
-    # Mode label
+    # ── Top-right: Mode + FPS ─────────────────────────────────────────────
     mode_colors = {
-        "DRAW":   (0, 255, 100),
-        "CURSOR": (255, 200, 0),
-        "ERASE":  (0, 100, 255),
-        "MOVE":   (255, 100, 0),
-        "ZOOM":   (0, 220, 255),
-        "IDLE":   (150, 150, 150),
+        "DRAW":   (0, 255, 100),  "CURSOR": (255, 200, 0),
+        "ERASE":  (0, 100, 255),  "MOVE":   (255, 100, 0),
+        "ZOOM":   (0, 220, 255),  "IDLE":   (150, 150, 150),
     }
-    label = f"MODE: {mode}"
-    if mode == "ERASE":
-        label = "ERASER MODE (PALM)"
-    elif mode == "ZOOM":
-        label = f"ZOOM MODE  {int(scale_factor * 100)}%"
+    mode_lbl = mode
+    if mode == "ERASE":   mode_lbl = "ERASE (PALM)"
+    elif mode == "ZOOM":  mode_lbl = f"ZOOM {int(scale_factor*100)}%"
     mc = mode_colors.get(mode, (200, 200, 200))
-    cv2.putText(frame, label, (w - 420, 38),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.75, mc, 2)
+
+    # Mode pill top-right
+    (mw, mh), _ = cv2.getTextSize(mode_lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+    mx = w - mw - 20
+    my = 14
+    cv2.rectangle(frame, (mx - 8, my - mh - 4), (mx + mw + 8, my + 6),
+                  (20, 20, 20), -1)
+    cv2.rectangle(frame, (mx - 8, my - mh - 4), (mx + mw + 8, my + 6),
+                  mc, 1)
+    cv2.putText(frame, mode_lbl, (mx, my),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, mc, 2, cv2.LINE_AA)
 
     # FPS
-    cv2.putText(frame, f"FPS: {fps:.0f}", (w - 100, 38),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1)
+    cv2.putText(frame, f"{fps:.0f} FPS", (w - 70, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 120, 120), 1)
 
-    # Depth mode indicator
+    # 3D depth indicator
     if depth_enabled:
-        cv2.putText(frame, "3D DEPTH ON", (w - 230, 58 + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 200), 2)
+        cv2.putText(frame, "3D ON", (w - 70, 58),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 200), 1)
 
-    # Action label (UNDO / REDO / MOVE MODE) — large centred banner
+    # ── Action banner (UNDO/REDO/MOVE) ────────────────────────────────────
     if action_label:
         label_colors = {
-            "UNDO":      (80,  80,  255),
-            "REDO":      (80,  200, 80),
+            "UNDO": (80, 80, 255), "REDO": (80, 200, 80),
             "MOVE MODE": (255, 140, 0),
         }
         ac = label_colors.get(action_label, (220, 220, 220))
         (tw, th), _ = cv2.getTextSize(action_label,
                                       cv2.FONT_HERSHEY_SIMPLEX, 1.6, 4)
-        lx = (w - tw) // 2
-        ly = h // 2
-        cv2.rectangle(frame,
-                      (lx - 20, ly - th - 16),
-                      (lx + tw + 20, ly + 16),
+        lx = (w - tw) // 2; ly = h // 2
+        cv2.rectangle(frame, (lx-20, ly-th-16), (lx+tw+20, ly+16),
                       (15, 15, 15), -1)
-        cv2.rectangle(frame,
-                      (lx - 20, ly - th - 16),
-                      (lx + tw + 20, ly + 16),
-                      ac, 3)
+        cv2.rectangle(frame, (lx-20, ly-th-16), (lx+tw+20, ly+16), ac, 3)
         cv2.putText(frame, action_label, (lx, ly),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.6, ac, 4,
-                    lineType=cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.6, ac, 4, cv2.LINE_AA)
 
-    # Shape detection label — shown below the UI bar when active
+    # ── Shape label ───────────────────────────────────────────────────────
     if shape_label:
-        label_text = f"Shape: {shape_label}"
-        (tw, th), _ = cv2.getTextSize(label_text,
-                                      cv2.FONT_HERSHEY_SIMPLEX, 1.1, 3)
-        lx = (w - tw) // 2
-        ly = 105
-        # Dark pill background
-        cv2.rectangle(frame, (lx - 14, ly - th - 10),
-                      (lx + tw + 14, ly + 10),
+        txt = f"Shape: {shape_label}"
+        (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 1.1, 3)
+        lx = (w - tw) // 2; ly = 120
+        cv2.rectangle(frame, (lx-14, ly-th-10), (lx+tw+14, ly+10),
                       (20, 20, 20), -1)
-        cv2.rectangle(frame, (lx - 14, ly - th - 10),
-                      (lx + tw + 14, ly + 10),
+        cv2.rectangle(frame, (lx-14, ly-th-10), (lx+tw+14, ly+10),
                       (0, 220, 120), 2)
-        cv2.putText(frame, label_text, (lx, ly),
+        cv2.putText(frame, txt, (lx, ly),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 220, 120), 3,
-                    lineType=cv2.LINE_AA)
+                    cv2.LINE_AA)
 
     return frame
 
-# ─────────────────────────────────────────────
-# check_ui_click()
-# ─────────────────────────────────────────────
+def _panel_button_rects(frame_h=720):
+    """
+    Compute bounding rects for every panel button.
+    Returns dict: key -> (x1, y1, x2, y2)
+    """
+    rects = {}
+    cy = PANEL_Y + 8 + 22   # skip title
+
+    # Color buttons
+    for i in range(len(COLOR_NAMES)):
+        cx_btn = COLOR_BTN_X
+        cy_btn = cy + COLOR_BTN_R
+        r = COLOR_BTN_R + 4
+        rects[f'color_{i}'] = (cx_btn - r, cy_btn - r, cx_btn + r, cy_btn + r)
+        cy += COLOR_BTN_R * 2 + COLOR_BTN_GAP
+    cy += 8 + 22   # gap + brush title
+
+    # Brush buttons
+    for i in range(len(BRUSH_SIZES)):
+        rects[f'brush_{i}'] = (BRUSH_BTN_X, cy,
+                                BRUSH_BTN_X + BRUSH_BTN_W, cy + BRUSH_BTN_H)
+        cy += BRUSH_BTN_H + BRUSH_BTN_GAP
+    cy += 8 + 22   # gap + action title
+
+    # Action buttons
+    for lbl in ['UNDO', 'REDO', 'CLEAR', 'SAVE']:
+        rects[f'action_{lbl}'] = (ACTION_BTN_X, cy,
+                                   ACTION_BTN_X + ACTION_BTN_W, cy + ACTION_BTN_H)
+        cy += ACTION_BTN_H + ACTION_BTN_GAP
+    cy += 4
+
+    # Trash
+    rects['trash'] = (TRASH_BTN_X, cy,
+                      TRASH_BTN_X + TRASH_BTN_W, cy + TRASH_BTN_H)
+    return rects
+
+
 def check_ui_click(ix, iy, current_color_idx, current_brush_idx):
-    if COLOR_BTN_Y <= iy <= COLOR_BTN_Y + COLOR_BTN_H:
-        for i in range(len(COLOR_NAMES)):
-            bx = COLOR_BTN_MARGIN + i * (COLOR_BTN_W + COLOR_BTN_MARGIN)
-            if bx <= ix <= bx + COLOR_BTN_W:
-                return i, current_brush_idx
-
-    if BRUSH_BTN_Y <= iy <= BRUSH_BTN_Y + BRUSH_BTN_H:
-        for i in range(len(BRUSH_SIZES)):
-            bx = BRUSH_BTN_X_START + i * (BRUSH_BTN_W + COLOR_BTN_MARGIN)
-            if bx <= ix <= bx + BRUSH_BTN_W:
-                return current_color_idx, i
-
+    """Check if (ix, iy) hits a color or brush button. Returns updated indices."""
+    rects = _panel_button_rects()
+    for i in range(len(COLOR_NAMES)):
+        x1, y1, x2, y2 = rects[f'color_{i}']
+        if x1 <= ix <= x2 and y1 <= iy <= y2:
+            return i, current_brush_idx
+    for i in range(len(BRUSH_SIZES)):
+        x1, y1, x2, y2 = rects[f'brush_{i}']
+        if x1 <= ix <= x2 and y1 <= iy <= y2:
+            return current_color_idx, i
     return current_color_idx, current_brush_idx
 
 
-def is_over_trash(ix, iy, frame_w):
-    """Return True when finger tip (ix, iy) is hovering over the trash bin button."""
-    return (TRASH_BTN_X <= ix <= TRASH_BTN_X + TRASH_BTN_W and
-            TRASH_BTN_Y <= iy <= TRASH_BTN_Y + TRASH_BTN_H)
+def check_action_click(ix, iy):
+    """
+    Check if (ix, iy) hits an action button.
+    Returns action string ('UNDO','REDO','CLEAR','SAVE') or None.
+    """
+    rects = _panel_button_rects()
+    for lbl in ['UNDO', 'REDO', 'CLEAR', 'SAVE']:
+        x1, y1, x2, y2 = rects[f'action_{lbl}']
+        if x1 <= ix <= x2 and y1 <= iy <= y2:
+            return lbl
+    return None
+
+
+def is_over_trash(ix, iy, frame_w=0):
+    """Return True when (ix, iy) is over the trash bin button."""
+    rects = _panel_button_rects()
+    x1, y1, x2, y2 = rects['trash']
+    return x1 <= ix <= x2 and y1 <= iy <= y2
+
+
+def is_over_panel(ix, iy):
+    """Return True when (ix, iy) is anywhere inside the panel."""
+    rects = _panel_button_rects()
+    all_x2 = max(r[2] for r in rects.values())
+    all_y2 = max(r[3] for r in rects.values())
+    return (PANEL_X - 4 <= ix <= PANEL_X + PANEL_W + 4 and
+            PANEL_Y - 4 <= iy <= all_y2 + 4)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ██  FEATURE 1 — OBJECT DETECTION + BLUEPRINT MODE
@@ -2161,6 +2298,19 @@ def main():
         print("[ERROR] Cannot open webcam.")
         return
 
+    # ── Mouse state (for click-based panel interaction) ───────────────────
+    mouse_state = {'x': -1, 'y': -1, 'clicked': False}
+
+    def on_mouse(event, x, y, flags, param):
+        mouse_state['x'] = x
+        mouse_state['y'] = y
+        if event == cv2.EVENT_LBUTTONDOWN:
+            mouse_state['clicked'] = True
+
+    cv2.namedWindow("Hand Gesture Drawing  [d=3D  c=clear  s=save  q=quit]")
+    cv2.setMouseCallback(
+        "Hand Gesture Drawing  [d=3D  c=clear  s=save  q=quit]", on_mouse)
+
     fh_init = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fw_init = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     cx_cam  = fw_init / 2.0
@@ -2260,6 +2410,51 @@ def main():
         ch, cw = base_canvas.shape[:2]
         cx_cam = fw / 2.0
         cy_cam = fh / 2.0
+
+        # ── Mouse click on panel ──────────────────────────────────────────
+        if mouse_state['clicked']:
+            mx, my = mouse_state['x'], mouse_state['y']
+            mouse_state['clicked'] = False
+            # Color / brush selection
+            current_color_idx, current_brush_idx = check_ui_click(
+                mx, my, current_color_idx, current_brush_idx)
+            # Action buttons
+            act = check_action_click(mx, my)
+            if act == 'UNDO':
+                stroke_undo()
+                base_canvas, strokes_3d = undo_manager.undo(base_canvas, strokes_3d)
+            elif act == 'REDO':
+                stroke_redo()
+                base_canvas, strokes_3d = undo_manager.redo(base_canvas, strokes_3d)
+            elif act == 'CLEAR':
+                clear_canvas(base_canvas)
+                stroke_mgr.clear()
+                stroke_undo_stack.clear()
+                stroke_redo_stack.clear()
+                strokes_3d = []; current_stroke = None
+                z_history.clear()
+                offset_x, offset_y = 0, 0
+                scale_factor = 1.0; zoom_target_scale = 1.0
+                single_debouncer.reset(); zoom_debouncer.reset()
+                pinch_detector.reset(); two_finger_detector.reset()
+                undo_manager.reset(); shape_detector.reset()
+                pan_prev_wrist_x = None; pan_smooth_dx = 0.0
+                obj_drag_active = False; obj_drag_started = False
+                print("[INFO] Canvas cleared by mouse click.")
+            elif act == 'SAVE':
+                fname = f"drawing_{int(time.time())}.png"
+                cv2.imwrite(fname, base_canvas)
+                print(f"[INFO] Saved '{fname}'")
+            # Trash bin
+            if is_over_trash(mx, my):
+                if stroke_mgr.selected_idx >= 0:
+                    stroke_snap(); stroke_mgr.delete_selected()
+                    stroke_mgr.render(base_canvas)
+                    print("[INFO] Selected stroke deleted by mouse click.")
+                elif stroke_mgr.strokes:
+                    stroke_snap(); stroke_mgr.strokes.pop()
+                    stroke_mgr.render(base_canvas)
+                    print("[INFO] Last stroke deleted by mouse click.")
 
         # ── 3D: update camera tracker every frame (cheap ORB) ────────────
         cam_tracker.fx = FOCAL_LENGTH_X
@@ -2616,8 +2811,8 @@ def main():
                 obj_drag_active  = False
                 obj_drag_started = False
 
-                if iy < 60:
-                    # Hovering over UI bar — check trash bin first, then color/brush
+                if is_over_panel(ix, iy):
+                    # Hovering over floating panel — check trash bin first, then color/brush
                     if is_over_trash(ix, iy, fw):
                         # Trash bin hover — dwell to delete
                         if not trash_hovering:
@@ -2641,8 +2836,36 @@ def main():
                     else:
                         trash_hovering    = False
                         trash_dwell_start = 0.0
+                        # Color / brush selection
                         current_color_idx, current_brush_idx = check_ui_click(
                             ix, iy, current_color_idx, current_brush_idx)
+                        # Action buttons via gesture (instant on hover)
+                        _act = check_action_click(ix, iy)
+                        if _act == 'UNDO':
+                            stroke_undo()
+                            base_canvas, strokes_3d = undo_manager.undo(
+                                base_canvas, strokes_3d)
+                        elif _act == 'REDO':
+                            stroke_redo()
+                            base_canvas, strokes_3d = undo_manager.redo(
+                                base_canvas, strokes_3d)
+                        elif _act == 'CLEAR':
+                            clear_canvas(base_canvas)
+                            stroke_mgr.clear()
+                            stroke_undo_stack.clear(); stroke_redo_stack.clear()
+                            strokes_3d = []; current_stroke = None
+                            z_history.clear()
+                            offset_x, offset_y = 0, 0
+                            scale_factor = 1.0; zoom_target_scale = 1.0
+                            single_debouncer.reset(); zoom_debouncer.reset()
+                            pinch_detector.reset(); two_finger_detector.reset()
+                            undo_manager.reset(); shape_detector.reset()
+                            pan_prev_wrist_x = None; pan_smooth_dx = 0.0
+                            obj_drag_active = False; obj_drag_started = False
+                        elif _act == 'SAVE':
+                            fname = f"drawing_{int(time.time())}.png"
+                            cv2.imwrite(fname, base_canvas)
+                            print(f"[INFO] Saved '{fname}' via gesture.")
 
                     # End any active stroke when entering UI bar
                     if stroke_mgr.active_stroke is not None:
