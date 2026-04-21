@@ -141,6 +141,14 @@ BRUSH_BTN_Y      = 10
 BRUSH_BTN_W      = 50
 BRUSH_BTN_H      = 40
 
+# ── Trash bin button ──────────────────────────────────────────────────────
+TRASH_BTN_W      = 50
+TRASH_BTN_H      = 40
+TRASH_BTN_Y      = 10
+TRASH_DWELL_SECS = 0.8   # hover this long to trigger delete
+
+
+
 # ─────────────────────────────────────────────
 # MediaPipe Setup  (max_num_hands=2 for zoom)
 # ─────────────────────────────────────────────
@@ -309,8 +317,7 @@ class ShapeDetector:
         self.label_timer = 0.0         # time.time() when label was set
 
     # ── called every frame ───────────────────
-    def update(self, mode, cx, cy, base_canvas, color, brush,
-               cw, ch):
+    def update(self, mode, cx, cy, cw, ch):
         """
         Call once per frame from the main loop.
 
@@ -318,14 +325,11 @@ class ShapeDetector:
         ----------
         mode         : current debounced mode string
         cx, cy       : canvas-space finger position (only used when mode==DRAW)
-        base_canvas  : the drawing surface (modified in-place on conversion)
-        color        : current drawing color (BGR tuple)
-        brush        : current brush thickness
         cw, ch       : canvas width / height (for bounds clamping)
 
         Returns
         -------
-        label        : shape name to display (empty string = nothing to show)
+        (label, new_points) : shape name and list of new points (or None)
         """
         currently_drawing = (mode == "DRAW") and (cy >= 60)
 
@@ -342,12 +346,13 @@ class ShapeDetector:
         elif self.was_drawing:
             # Mode just left DRAW — trigger detection
             self.was_drawing = False
-            detected = self._detect_and_replace(base_canvas, color, brush, cw, ch)
+            detected, new_points = self._detect_and_replace(cw, ch)
             self.points = []
             if detected:
                 self.label       = detected
                 self.label_timer = time.time()
                 print(f"[SHAPE] Detected: {detected}")
+                return detected, new_points
 
         else:
             # Not drawing and wasn't drawing — nothing to do
@@ -357,17 +362,16 @@ class ShapeDetector:
         if self.label and (time.time() - self.label_timer > SHAPE_LABEL_SECS):
             self.label = ""
 
-        return self.label
+        return self.label, None
 
     # ── internal: classify + replace ─────────
-    def _detect_and_replace(self, canvas, color, brush, cw, ch):
+    def _detect_and_replace(self, cw, ch):
         """
-        Analyse self.points, classify the shape, erase the rough stroke
-        from the bounding region, and draw a clean geometric shape.
-        Returns the shape name string, or None if detection failed.
+        Analyse self.points, classify the shape, and return geometric points.
+        Returns (shape_name, new_points) or (None, None) if detection failed.
         """
         if len(self.points) < SHAPE_MIN_POINTS:
-            return None
+            return None, None
 
         # ── 1. Smooth points with a simple moving average (window=5) ──
         pts = np.array(self.points, dtype=np.float32)
@@ -385,7 +389,7 @@ class ShapeDetector:
         # ── 3. Bounding rect — reject tiny shapes ─────────────────────
         x, y, w, h = cv2.boundingRect(contour)
         if w * h < SHAPE_MIN_AREA:
-            return None
+            return None, None
 
         # ── 4. Approximate polygon ────────────────────────────────────
         peri   = cv2.arcLength(contour, True)
@@ -395,12 +399,16 @@ class ShapeDetector:
         # ── 5. Classify ───────────────────────────────────────────────
         if n == 2:
             shape_name = "LINE"
+            new_points = [tuple(pts_smooth[0]), tuple(pts_smooth[-1])]
         elif n == 3:
             shape_name = "TRIANGLE"
+            new_points = [tuple(p[0]) for p in approx]
+            new_points.append(new_points[0])
         elif n == 4:
             # Distinguish square vs rectangle by aspect ratio
             aspect = w / float(h) if h > 0 else 1.0
             shape_name = "SQUARE" if 0.85 <= aspect <= 1.15 else "RECTANGLE"
+            new_points = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]
         elif n > 6:
             # Extra circularity check: area / (pi * r^2)
             area      = cv2.contourArea(contour)
@@ -409,51 +417,19 @@ class ShapeDetector:
                 circularity = area / (np.pi * radius ** 2)
             else:
                 circularity = 0.0
-            shape_name = "CIRCLE" if circularity > 0.65 else "POLYGON"
+            if circularity > 0.65:
+                shape_name = "CIRCLE"
+                new_points = [tuple(p) for p in cv2.ellipse2Poly((int(cx2), int(cy2)), (int(radius), int(radius)), 0, 0, 360, 10)]
+            else:
+                shape_name = "POLYGON"
+                new_points = [tuple(p[0]) for p in approx]
+                new_points.append(new_points[0])
         else:
             shape_name = "POLYGON"
+            new_points = [tuple(p[0]) for p in approx]
+            new_points.append(new_points[0])
 
-        # ── 6. Erase the rough stroke from the bounding region ────────
-        # Add a small margin so we don't leave artefacts at the edges
-        margin = max(brush + 4, 8)
-        ex1 = max(0,  x - margin)
-        ey1 = max(0,  y - margin)
-        ex2 = min(cw, x + w + margin)
-        ey2 = min(ch, y + h + margin)
-
-        # Build a mask of the rough stroke pixels and erase only those
-        stroke_mask = np.zeros((ch, cw), dtype=np.uint8)
-        cv2.polylines(stroke_mask, [pts_smooth.reshape((-1, 1, 2))],
-                      False, 255, brush + 2)
-        cv2.dilate(stroke_mask, np.ones((5, 5), np.uint8), dst=stroke_mask)
-        canvas[stroke_mask > 0] = 0
-
-        # ── 7. Draw clean shape ───────────────────────────────────────
-        thickness = max(brush, 2)
-
-        if shape_name == "LINE":
-            start = tuple(pts_smooth[0])
-            end   = tuple(pts_smooth[-1])
-            cv2.line(canvas, start, end, color, thickness, lineType=cv2.LINE_AA)
-
-        elif shape_name == "TRIANGLE":
-            cv2.drawContours(canvas, [approx], -1, color,
-                             thickness, lineType=cv2.LINE_AA)
-
-        elif shape_name in ("RECTANGLE", "SQUARE"):
-            cv2.rectangle(canvas, (x, y), (x + w, y + h),
-                          color, thickness, lineType=cv2.LINE_AA)
-
-        elif shape_name == "CIRCLE":
-            (cx2, cy2), radius = cv2.minEnclosingCircle(contour)
-            cv2.circle(canvas, (int(cx2), int(cy2)), int(radius),
-                       color, thickness, lineType=cv2.LINE_AA)
-
-        else:  # POLYGON — draw the approximated contour as-is
-            cv2.drawContours(canvas, [approx], -1, color,
-                             thickness, lineType=cv2.LINE_AA)
-
-        return shape_name
+        return shape_name, new_points
 
     def reset(self):
         """Hard reset — call on canvas clear."""
@@ -1247,10 +1223,29 @@ class Stroke2D:
         return (min(xs), min(ys), max(xs), max(ys))
 
     def distance_to(self, px, py):
-        """Minimum distance from point (px, py) to any point in this stroke."""
+        """Minimum distance from point (px, py) to any line segment in this stroke."""
         if not self.points:
             return float('inf')
-        return float(min(np.hypot(p[0] - px, p[1] - py) for p in self.points))
+        if len(self.points) == 1:
+            return float(np.hypot(self.points[0][0] - px, self.points[0][1] - py))
+        
+        min_d = float('inf')
+        p = np.array([px, py], dtype=np.float64)
+        for i in range(1, len(self.points)):
+            a = np.array(self.points[i - 1], dtype=np.float64)
+            b = np.array(self.points[i], dtype=np.float64)
+            ab = b - a
+            ap = p - a
+            if ab[0] == 0 and ab[1] == 0:
+                d = np.linalg.norm(ap)
+            else:
+                t = np.dot(ap, ab) / np.dot(ab, ab)
+                t = max(0.0, min(1.0, t))
+                proj = a + t * ab
+                d = np.linalg.norm(p - proj)
+            if d < min_d:
+                min_d = d
+        return float(min_d)
 
     def draw(self, canvas):
         """Render this stroke onto canvas."""
@@ -1666,7 +1661,8 @@ def screen_to_canvas(sx, sy, fw, fh, cw, ch, offset_x, offset_y, scale_factor):
 # ─────────────────────────────────────────────
 def draw_ui(frame, current_color_idx, current_brush_idx,
             mode, fps, scale_factor, shape_label="",
-            depth_enabled=False, action_label=""):
+            depth_enabled=False, action_label="",
+            trash_hover_progress=0.0, trash_has_selection=False):
     h, w = frame.shape[:2]
 
     # Semi-transparent top bar
@@ -1702,6 +1698,68 @@ def draw_ui(frame, current_color_idx, current_brush_idx,
         cv2.circle(frame,
                    (bx + BRUSH_BTN_W // 2, by + BRUSH_BTN_H // 2),
                    size, (200, 200, 200), -1)
+
+    # ── Trash bin button (top-centre) ─────────────────────────────────────
+    trash_cx = w // 2
+    trash_bx = trash_cx - TRASH_BTN_W // 2
+    trash_by = TRASH_BTN_Y
+
+    # Background — red if selection active, dark grey otherwise
+    if trash_has_selection:
+        trash_bg = (30, 30, 180)   # dark red (BGR)
+        trash_fg = (80, 80, 255)   # bright red
+    else:
+        trash_bg = (50, 50, 50)
+        trash_fg = (160, 160, 160)
+
+    cv2.rectangle(frame,
+                  (trash_bx, trash_by),
+                  (trash_bx + TRASH_BTN_W, trash_by + TRASH_BTN_H),
+                  trash_bg, -1)
+
+    # Draw trash can icon using OpenCV primitives
+    # Can body
+    bx0 = trash_bx + 10
+    by0 = trash_by + 14
+    bw  = TRASH_BTN_W - 20
+    bh  = TRASH_BTN_H - 18
+    cv2.rectangle(frame, (bx0, by0), (bx0 + bw, by0 + bh), trash_fg, 2)
+    # Lid
+    cv2.rectangle(frame,
+                  (bx0 - 2, by0 - 5),
+                  (bx0 + bw + 2, by0 - 1),
+                  trash_fg, 2)
+    # Handle on lid
+    hx = trash_bx + TRASH_BTN_W // 2
+    cv2.rectangle(frame, (hx - 5, by0 - 9), (hx + 5, by0 - 5), trash_fg, 2)
+    # Vertical lines inside can (stripes)
+    for lx in [bx0 + bw // 4, bx0 + bw // 2, bx0 + 3 * bw // 4]:
+        cv2.line(frame, (lx, by0 + 3), (lx, by0 + bh - 3), trash_fg, 1)
+
+    # Dwell progress arc around the button
+    if trash_hover_progress > 0:
+        angle = int(360 * trash_hover_progress)
+        cx_t  = trash_bx + TRASH_BTN_W // 2
+        cy_t  = trash_by + TRASH_BTN_H // 2
+        cv2.ellipse(frame,
+                    (cx_t, cy_t),
+                    (TRASH_BTN_W // 2 + 4, TRASH_BTN_H // 2 + 4),
+                    -90, 0, angle,
+                    (80, 80, 255) if trash_has_selection else (200, 200, 80),
+                    3)
+
+    # Border
+    border_col = (80, 80, 255) if trash_has_selection else (100, 100, 100)
+    cv2.rectangle(frame,
+                  (trash_bx - 1, trash_by - 1),
+                  (trash_bx + TRASH_BTN_W + 1, trash_by + TRASH_BTN_H + 1),
+                  border_col, 1)
+
+    # Label below icon
+    cv2.putText(frame, "DEL",
+                (trash_bx + 8, trash_by + TRASH_BTN_H + 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                trash_fg, 1, cv2.LINE_AA)
 
     # Mode label
     mode_colors = {
@@ -1774,7 +1832,6 @@ def draw_ui(frame, current_color_idx, current_brush_idx,
 
     return frame
 
-
 # ─────────────────────────────────────────────
 # check_ui_click()
 # ─────────────────────────────────────────────
@@ -1792,6 +1849,14 @@ def check_ui_click(ix, iy, current_color_idx, current_brush_idx):
                 return current_color_idx, i
 
     return current_color_idx, current_brush_idx
+
+
+def is_over_trash(ix, iy, frame_w):
+    """Return True when finger tip (ix, iy) is hovering over the trash bin button."""
+    trash_bx = frame_w // 2 - TRASH_BTN_W // 2
+    trash_by = TRASH_BTN_Y
+    return (trash_bx <= ix <= trash_bx + TRASH_BTN_W and
+            trash_by <= iy <= trash_by + TRASH_BTN_H)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ██  FEATURE 1 — OBJECT DETECTION + BLUEPRINT MODE
@@ -2137,6 +2202,10 @@ def main():
     # ── Feature 2: Canvas pan ─────────────────────────────────────────────
     pan_prev_wrist_x = None   # wrist x from previous frame (screen px)
     pan_smooth_dx    = 0.0    # EMA-smoothed horizontal delta
+
+    # ── Trash bin dwell state ─────────────────────────────────────────────
+    trash_dwell_start = 0.0   # time.time() when finger entered trash zone
+    trash_hovering    = False  # True while finger is over trash bin
 
     # ── Stroke undo/redo helpers (closures over stroke_mgr stacks) ────────
     def stroke_snap():
@@ -2540,9 +2609,33 @@ def main():
                 obj_drag_started = False
 
                 if iy < 60:
-                    # Hovering over UI bar — select color/brush
-                    current_color_idx, current_brush_idx = check_ui_click(
-                        ix, iy, current_color_idx, current_brush_idx)
+                    # Hovering over UI bar — check trash bin first, then color/brush
+                    if is_over_trash(ix, iy, fw):
+                        # Trash bin hover — dwell to delete
+                        if not trash_hovering:
+                            trash_hovering    = True
+                            trash_dwell_start = time.time()
+                        else:
+                            dwell_elapsed = time.time() - trash_dwell_start
+                            if dwell_elapsed >= TRASH_DWELL_SECS:
+                                if stroke_mgr.selected_idx >= 0:
+                                    stroke_snap()
+                                    stroke_mgr.delete_selected()
+                                    stroke_mgr.render(base_canvas)
+                                    print("[INFO] Selected stroke deleted.")
+                                elif stroke_mgr.strokes:
+                                    stroke_snap()
+                                    stroke_mgr.strokes.pop()
+                                    stroke_mgr.render(base_canvas)
+                                    print("[INFO] Last stroke deleted.")
+                                trash_hovering    = False
+                                trash_dwell_start = 0.0
+                    else:
+                        trash_hovering    = False
+                        trash_dwell_start = 0.0
+                        current_color_idx, current_brush_idx = check_ui_click(
+                            ix, iy, current_color_idx, current_brush_idx)
+
                     # End any active stroke when entering UI bar
                     if stroke_mgr.active_stroke is not None:
                         s = stroke_mgr.finish_draw()
@@ -2634,7 +2727,9 @@ def main():
                         base_canvas, strokes_3d)
 
                 prev_x, prev_y     = None, None
-                smooth_x, smooth_y = None, None   # reset so DRAW re-entry snaps to finger
+                smooth_x, smooth_y = None, None
+                trash_hovering    = False
+                trash_dwell_start = 0.0
 
                 # Visual: hollow circle cursor + tap indicator
                 cursor_col = (255, 200, 0)
@@ -2657,7 +2752,9 @@ def main():
             else:
                 _draw_cx, _draw_cy = 0, 0
                 in_pinch = False
-                smooth_x, smooth_y = None, None   # reset so DRAW re-entry snaps to finger
+                smooth_x, smooth_y = None, None
+                trash_hovering    = False
+                trash_dwell_start = 0.0
                 pinch_detector.update(False)
                 prev_x, prev_y = None, None
                 if current_stroke is not None and len(current_stroke) > 0:
@@ -2668,15 +2765,26 @@ def main():
             # ── Shape detector ────────────────────────────────
             _sd_cx  = _draw_cx if mode == "DRAW" else 0
             _sd_cy  = _draw_cy if mode == "DRAW" else 0
-            _color  = COLORS[COLOR_NAMES[current_color_idx]]
-            _brush  = max(1, int(BRUSH_SIZES[current_brush_idx] / scale_factor))
             _was_drawing_before = shape_detector.was_drawing
-            shape_detector.update(
-                mode, _sd_cx, _sd_cy,
-                base_canvas, _color, _brush, cw, ch)
+            shape_name, new_points = shape_detector.update(
+                mode, _sd_cx, _sd_cy, cw, ch)
+            
             # Snapshot when a 2D stroke just completed (shape detector fired)
             if _was_drawing_before and not shape_detector.was_drawing:
+                if stroke_mgr.active_stroke is not None:
+                    s = stroke_mgr.finish_draw()
+                    if s:
+                        if new_points and stroke_mgr.strokes:
+                            stroke_mgr.strokes[-1].points = new_points
+                        stroke_mgr.render(base_canvas)
+                        stroke_snap()
                 undo_manager.snapshot(base_canvas, strokes_3d)
+
+            if mode != "MOVE" and obj_drag_active:
+                stroke_mgr.end_drag()
+                stroke_snap()
+                obj_drag_active = False
+                obj_drag_started = False
 
         # ══════════════════════════════════════════════════════
         # NO HANDS
@@ -2697,11 +2805,7 @@ def main():
                 strokes_3d.append(current_stroke)
                 undo_manager.snapshot(base_canvas, strokes_3d)
             current_stroke = None
-            shape_detector.update(
-                "IDLE", 0, 0, base_canvas,
-                COLORS[COLOR_NAMES[current_color_idx]],
-                max(1, int(BRUSH_SIZES[current_brush_idx] / scale_factor)),
-                cw, ch)
+            shape_detector.update("IDLE", 0, 0, cw, ch)
 
         # ── Render 2D canvas ──────────────────────────────────────────────
         frame = render_canvas(frame, base_canvas,
@@ -2776,11 +2880,16 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0,
                         (0, 255, 120), 3, cv2.LINE_AA)
 
+        _trash_prog = 0.0
+        if trash_hovering and trash_dwell_start > 0:
+            _trash_prog = min(1.0, (time.time() - trash_dwell_start) / TRASH_DWELL_SECS)
         frame = draw_ui(frame, current_color_idx, current_brush_idx,
                         mode, fps, scale_factor,
                         shape_label=shape_detector.label,
                         depth_enabled=depth_enabled,
-                        action_label=_action_lbl)
+                        action_label=_action_lbl,
+                        trash_hover_progress=_trash_prog,
+                        trash_has_selection=(stroke_mgr.selected_idx >= 0))
 
         cv2.imshow(
             "Hand Gesture Drawing  [d=3D  c=clear  s=save  q=quit]", frame)
