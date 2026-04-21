@@ -2003,6 +2003,128 @@ def is_over_panel(ix, iy):
     return (PANEL_X - 4 <= ix <= PANEL_X + PANEL_W + 4 and
             PANEL_Y - 4 <= iy <= all_y2 + 4)
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ██  DRAG-TO-DELETE TRASH BIN
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Trash bin geometry (top-centre of frame)
+DRAG_TRASH_W    = 80    # hit-box width  (px)
+DRAG_TRASH_H    = 80    # hit-box height (px)
+DRAG_TRASH_Y    = 20    # distance from top of frame
+
+def _drag_trash_rect(frame_w):
+    """Return (x1, y1, x2, y2) of the drag-to-delete trash bin."""
+    cx = frame_w // 2
+    x1 = cx - DRAG_TRASH_W // 2
+    y1 = DRAG_TRASH_Y
+    return x1, y1, x1 + DRAG_TRASH_W, y1 + DRAG_TRASH_H
+
+
+def draw_trash_icon(frame, is_hovering):
+    """
+    Draw the drag-to-delete trash bin at the top-centre of `frame`.
+
+    Parameters
+    ----------
+    frame       : BGR frame (drawn on in-place)
+    is_hovering : bool — True when the dragged stroke is over the bin
+
+    Visual:
+      Normal  : grey icon, normal size
+      Hovering: red icon, 1.3× scale, pulsing glow ring
+    """
+    fh, fw = frame.shape[:2]
+    x1, y1, x2, y2 = _drag_trash_rect(fw)
+    cx = (x1 + x2) // 2
+    cy = (y1 + y2) // 2
+
+    if is_hovering:
+        # Scale 1.3× around centre
+        scale  = 1.3
+        hw     = int(DRAG_TRASH_W * scale / 2)
+        hh     = int(DRAG_TRASH_H * scale / 2)
+        rx1, ry1 = cx - hw, cy - hh
+        rx2, ry2 = cx + hw, cy + hh
+        bg_col   = (0, 0, 180)      # dark red bg
+        icon_col = (60, 60, 255)    # bright red icon
+        # Glow ring
+        cv2.circle(frame, (cx, cy), hw + 8, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.circle(frame, (cx, cy), hw + 14, (0, 0, 180), 1, cv2.LINE_AA)
+    else:
+        rx1, ry1 = x1, y1
+        rx2, ry2 = x2, y2
+        bg_col   = (40, 40, 40)
+        icon_col = (160, 160, 160)
+
+    # Background pill
+    cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), bg_col, -1, cv2.LINE_AA)
+    cv2.rectangle(frame, (rx1, ry1), (rx2, ry2),
+                  (0, 0, 255) if is_hovering else (90, 90, 90), 2, cv2.LINE_AA)
+
+    # ── Trash can icon ────────────────────────────────────────────────────
+    # Scale icon elements relative to box size
+    bw = rx2 - rx1
+    bh = ry2 - ry1
+    # Can body
+    bx0 = rx1 + bw // 5
+    by0 = ry1 + bh // 3
+    bw2 = bw * 3 // 5
+    bh2 = bh * 5 // 9
+    cv2.rectangle(frame, (bx0, by0), (bx0 + bw2, by0 + bh2), icon_col, 2)
+    # Lid
+    cv2.rectangle(frame,
+                  (bx0 - 3, by0 - 6),
+                  (bx0 + bw2 + 3, by0 - 1), icon_col, 2)
+    # Handle
+    hx = rx1 + bw // 2
+    cv2.rectangle(frame, (hx - 6, by0 - 11), (hx + 6, by0 - 6), icon_col, 2)
+    # Stripes
+    for lx in [bx0 + bw2 // 4, bx0 + bw2 // 2, bx0 + 3 * bw2 // 4]:
+        cv2.line(frame, (lx, by0 + 4), (lx, by0 + bh2 - 4), icon_col, 1)
+
+    # Label
+    lbl = "DROP TO DELETE" if is_hovering else "DRAG HERE"
+    (tw, _), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+    cv2.putText(frame, lbl,
+                (cx - tw // 2, ry2 + 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                (0, 80, 255) if is_hovering else (140, 140, 140),
+                1, cv2.LINE_AA)
+
+
+def is_hovering_trash(fx, fy, frame_w):
+    """
+    Return True when finger/pinch point (fx, fy) is inside the trash bin.
+
+    Parameters
+    ----------
+    fx, fy   : screen-space finger coordinates
+    frame_w  : frame width (used to compute bin centre)
+    """
+    x1, y1, x2, y2 = _drag_trash_rect(frame_w)
+    return x1 <= fx <= x2 and y1 <= fy <= y2
+
+
+def delete_stroke(stroke_mgr_obj, selected_id):
+    """
+    Remove the stroke with `selected_id` from stroke_mgr_obj.strokes.
+    Deselects and returns True if deleted, False if not found.
+
+    Parameters
+    ----------
+    stroke_mgr_obj : StrokeManager instance
+    selected_id    : id attribute of the Stroke2D to remove
+                     (uses index if id not available)
+    """
+    before = len(stroke_mgr_obj.strokes)
+    stroke_mgr_obj.strokes = [
+        s for s in stroke_mgr_obj.strokes
+        if id(s) != selected_id
+    ]
+    stroke_mgr_obj.selected_idx = -1
+    return len(stroke_mgr_obj.strokes) < before
+
 # ═══════════════════════════════════════════════════════════════════════════
 # ██  FEATURE 1 — OBJECT DETECTION + BLUEPRINT MODE
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2364,6 +2486,11 @@ def main():
     # ── Trash bin dwell state ─────────────────────────────────────────────
     trash_dwell_start = 0.0   # time.time() when finger entered trash zone
     trash_hovering    = False  # True while finger is over trash bin
+
+    # ── Drag-to-delete state ──────────────────────────────────────────────
+    drag_trash_visible  = False   # show top-centre trash only while dragging
+    drag_trash_hovering = False   # finger is over the drag-trash bin
+    drag_trash_obj_id   = -1      # Python id() of the stroke being dragged
 
     # ── Stroke undo/redo helpers (closures over stroke_mgr stacks) ────────
     def stroke_snap():
@@ -2770,16 +2897,24 @@ def main():
                         # Drag selected stroke object
                         stroke_mgr.update_drag(mid_cx, mid_cy)
                         stroke_mgr.render(base_canvas)
+
+                        # ── Drag-to-delete: show trash + check hover ──────
+                        drag_trash_visible  = True
+                        drag_trash_hovering = is_hovering_trash(mid_x, mid_y, fw)
+                        drag_trash_obj_id   = id(stroke_mgr.strokes[stroke_mgr.selected_idx])
+
                         # Show selection highlight on frame
                         s = stroke_mgr.strokes[stroke_mgr.selected_idx]
                         x1, y1, x2, y2 = s.bounding_box()
+                        box_col = (0, 60, 255) if drag_trash_hovering else (0, 255, 200)
                         cv2.rectangle(frame,
                                       (x1 - 8, y1 - 8), (x2 + 8, y2 + 8),
-                                      (0, 255, 200), 2)
-                        cv2.putText(frame, "DRAGGING",
+                                      box_col, 2)
+                        lbl_drag = "RELEASE TO DELETE!" if drag_trash_hovering else "DRAGGING"
+                        cv2.putText(frame, lbl_drag,
                                     (x1, y1 - 14),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                                    (0, 255, 200), 2, cv2.LINE_AA)
+                                    box_col, 2, cv2.LINE_AA)
                     else:
                         # Canvas pan (no object selected)
                         dx = mid_x - pinch_anchor_x
@@ -2790,6 +2925,8 @@ def main():
                     # Hold threshold not yet crossed
                     in_pinch         = False
                     obj_drag_started = False
+                    drag_trash_visible  = False
+                    drag_trash_hovering = False
 
                 # Visual feedback
                 cv2.circle(frame, (mid_x, mid_y), 14, (255, 100, 0), -1)
@@ -3012,9 +3149,25 @@ def main():
                 undo_manager.snapshot(base_canvas, strokes_3d)
 
             if mode != "MOVE" and obj_drag_active:
-                stroke_mgr.end_drag()
-                stroke_snap()
-                obj_drag_active = False
+                # Drag ended — check if dropped on trash bin
+                if drag_trash_visible and drag_trash_hovering and stroke_mgr.selected_idx >= 0:
+                    stroke_snap()
+                    deleted = delete_stroke(stroke_mgr, drag_trash_obj_id)
+                    if deleted:
+                        stroke_mgr.render(base_canvas)
+                        print("[INFO] Stroke deleted by drag-to-trash.")
+                    # Flash feedback
+                    cv2.putText(frame, "DELETED!",
+                                (fw // 2 - 60, fh // 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.4,
+                                (0, 60, 255), 3, cv2.LINE_AA)
+                else:
+                    stroke_mgr.end_drag()
+                    stroke_snap()
+                drag_trash_visible  = False
+                drag_trash_hovering = False
+                drag_trash_obj_id   = -1
+                obj_drag_active  = False
                 obj_drag_started = False
 
         # ══════════════════════════════════════════════════════
@@ -3041,6 +3194,10 @@ def main():
         # ── Render 2D canvas ──────────────────────────────────────────────
         frame = render_canvas(frame, base_canvas,
                               offset_x, offset_y, scale_factor)
+
+        # ── Drag-to-delete trash bin (shown only while dragging a stroke) ─
+        if drag_trash_visible:
+            draw_trash_icon(frame, drag_trash_hovering)
 
         # ── Feature 1: Object detection + Blueprint overlay ───────────────
         if detections:
@@ -3179,6 +3336,9 @@ def main():
             pan_smooth_dx    = 0.0
             obj_drag_active  = False
             obj_drag_started = False
+            drag_trash_visible  = False
+            drag_trash_hovering = False
+            drag_trash_obj_id   = -1
             print("[INFO] Canvas cleared.")
 
         elif key == ord('s'):
