@@ -6,24 +6,147 @@
 <title>Hand Gesture Drawing</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#111;color:#eee;font-family:Segoe UI,sans-serif;height:100vh;overflow:hidden;display:flex;flex-direction:column}
-#toolbar{display:flex;align-items:center;gap:12px;padding:6px 14px;background:rgba(20,20,20,.95);border-bottom:1px solid #333;flex-shrink:0;flex-wrap:wrap;z-index:10}
-.tlabel{font-size:11px;color:#888}
-#colors,#brushes,#actions,#mdisp{display:flex;align-items:center;gap:6px}
-.cbtn{width:26px;height:26px;border-radius:50%;border:2px solid transparent;cursor:pointer;transition:.15s}
-.cbtn:hover{transform:scale(1.2)}.cbtn.active{border-color:#fff;transform:scale(1.15)}
-.bbtn{padding:3px 10px;border-radius:6px;border:1px solid #555;background:#2a2a2a;color:#ccc;cursor:pointer;font-size:12px}
-.bbtn:hover{background:#3a3a3a}.bbtn.active{background:#555;color:#fff;border-color:#aaa}
-#actions button{padding:4px 12px;border-radius:6px;border:1px solid #555;background:#2a2a2a;color:#ccc;cursor:pointer;font-size:12px}
-#actions button:hover{background:#3a3a3a;color:#fff}
-#mdisp{margin-left:auto;gap:12px}
-#mlabel{font-size:13px;font-weight:700;letter-spacing:1px;color:#64ff96;min-width:90px;text-align:right}
-#fpslabel{font-size:11px;color:#666;min-width:55px}
-#wrap{position:relative;flex:1;overflow:hidden;background:#000}
-#webcam{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);z-index:0}
-#dc,#oc{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1}
+body{background:#000;overflow:hidden;width:100vw;height:100vh}
+
+/* ── Full-screen camera area ── */
+#wrap{position:fixed;inset:0;z-index:0}
+#webcam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+#dc,#oc{position:absolute;inset:0;width:100%;height:100%}
 #oc{z-index:2;pointer-events:none}
-#banner{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:2.2rem;font-weight:900;letter-spacing:3px;padding:14px 40px;border-radius:14px;border:3px solid transparent;background:rgba(10,10,10,.85);pointer-events:none;opacity:0;transition:opacity .25s;z-index:100}
+
+/* ── Floating left panel ── */
+#panel{
+  position:fixed;top:12px;left:12px;
+  width:130px;
+  background:rgba(12,12,18,0.88);
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:14px;
+  padding:10px 8px 12px;
+  z-index:20;
+  backdrop-filter:blur(8px);
+  display:flex;flex-direction:column;gap:0;
+  user-select:none;
+}
+
+/* Section headers */
+.sec-title{
+  font-family:'Segoe UI',sans-serif;
+  font-size:9px;letter-spacing:2px;
+  color:rgba(255,255,255,0.35);
+  text-transform:uppercase;
+  text-align:center;
+  margin:6px 0 6px;
+}
+.sec-title:first-child{margin-top:0}
+
+/* ── Color buttons ── */
+#color-grid{
+  display:grid;
+  grid-template-columns:repeat(2,1fr);
+  gap:6px;
+  padding:0 4px;
+}
+.cbtn{
+  width:100%;aspect-ratio:1;
+  border-radius:50%;
+  border:2px solid rgba(255,255,255,0.15);
+  cursor:pointer;
+  transition:transform .12s,border-color .12s,box-shadow .12s;
+  position:relative;
+}
+.cbtn:hover{transform:scale(1.18);border-color:rgba(255,255,255,0.5)}
+.cbtn.active{
+  border-color:#fff;
+  box-shadow:0 0 0 3px rgba(255,255,255,0.25);
+  transform:scale(1.12);
+}
+/* Tooltip on hover */
+.cbtn::after{
+  content:attr(data-name);
+  position:absolute;left:110%;top:50%;transform:translateY(-50%);
+  background:rgba(0,0,0,0.85);color:#fff;
+  font-size:10px;padding:2px 6px;border-radius:4px;
+  white-space:nowrap;pointer-events:none;
+  opacity:0;transition:opacity .15s;
+}
+.cbtn:hover::after{opacity:1}
+
+/* ── Brush size buttons ── */
+#brush-list{display:flex;flex-direction:column;gap:5px;padding:0 4px}
+.bbtn{
+  display:flex;align-items:center;gap:8px;
+  padding:6px 8px;border-radius:8px;
+  border:1px solid rgba(255,255,255,0.1);
+  background:rgba(255,255,255,0.05);
+  cursor:pointer;transition:background .12s,border-color .12s;
+  color:#ccc;font-family:'Segoe UI',sans-serif;font-size:12px;
+}
+.bbtn:hover{background:rgba(255,255,255,0.12);border-color:rgba(255,255,255,0.3)}
+.bbtn.active{background:rgba(100,255,150,0.15);border-color:#64ff96;color:#64ff96}
+.bdot{border-radius:50%;background:currentColor;flex-shrink:0}
+.blabel{flex:1;font-weight:600}
+.bpx{font-size:10px;opacity:.55}
+
+/* ── Action buttons ── */
+#action-list{display:flex;flex-direction:column;gap:5px;padding:0 4px}
+.abtn{
+  padding:7px 0;border-radius:8px;
+  border:1px solid rgba(255,255,255,0.1);
+  background:rgba(255,255,255,0.05);
+  cursor:pointer;transition:background .12s,border-color .12s;
+  color:#ccc;font-family:'Segoe UI',sans-serif;
+  font-size:12px;font-weight:600;text-align:center;
+  letter-spacing:.5px;
+}
+.abtn:hover{background:rgba(255,255,255,0.14);border-color:rgba(255,255,255,0.3);color:#fff}
+#bundo{border-color:rgba(100,120,255,0.3)}
+#bundo:hover{background:rgba(100,120,255,0.2);border-color:#6699ff;color:#6699ff}
+#bredo{border-color:rgba(100,220,100,0.3)}
+#bredo:hover{background:rgba(100,220,100,0.2);border-color:#66ff88;color:#66ff88}
+#bclear{border-color:rgba(255,80,80,0.3)}
+#bclear:hover{background:rgba(255,80,80,0.2);border-color:#ff5555;color:#ff5555}
+#bsave{border-color:rgba(80,200,80,0.3)}
+#bsave:hover{background:rgba(80,200,80,0.2);border-color:#44ff88;color:#44ff88}
+
+/* ── Trash bin button ── */
+#btrash{
+  margin:6px 4px 0;
+  padding:7px 0;border-radius:8px;
+  border:1px solid rgba(255,80,80,0.25);
+  background:rgba(255,40,40,0.08);
+  cursor:pointer;transition:background .12s,border-color .12s;
+  color:#ff6666;font-family:'Segoe UI',sans-serif;
+  font-size:12px;font-weight:600;text-align:center;
+}
+#btrash:hover{background:rgba(255,40,40,0.25);border-color:#ff4444;color:#ff4444}
+#btrash.has-selection{background:rgba(255,0,0,0.2);border-color:#ff0000;color:#ff3333}
+
+/* ── Mode + FPS pill (top-right) ── */
+#hud{
+  position:fixed;top:14px;right:14px;
+  display:flex;flex-direction:column;align-items:flex-end;gap:4px;
+  z-index:20;pointer-events:none;
+}
+#mlabel{
+  font-family:'Segoe UI',sans-serif;font-size:14px;font-weight:800;
+  letter-spacing:2px;color:#64ff96;
+  background:rgba(0,0,0,0.6);
+  padding:4px 14px;border-radius:20px;
+  border:1px solid rgba(100,255,150,0.3);
+}
+#fpslabel{
+  font-family:'Segoe UI',sans-serif;font-size:11px;color:rgba(255,255,255,0.35);
+  background:rgba(0,0,0,0.5);padding:2px 10px;border-radius:10px;
+}
+
+/* ── Flash banner ── */
+#banner{
+  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  font-family:'Segoe UI',sans-serif;font-size:2rem;font-weight:900;
+  letter-spacing:3px;padding:14px 40px;border-radius:14px;
+  border:3px solid transparent;background:rgba(10,10,10,.88);
+  pointer-events:none;opacity:0;transition:opacity .25s;z-index:100;
+}
 #banner.show{opacity:1}
 #banner.undo{color:#6699ff;border-color:#6699ff}
 #banner.redo{color:#66ff88;border-color:#66ff88}
@@ -31,47 +154,100 @@ body{background:#111;color:#eee;font-family:Segoe UI,sans-serif;height:100vh;ove
 #banner.erase{color:#ff5555;border-color:#ff5555}
 #banner.shape{color:#44ffcc;border-color:#44ffcc}
 #banner.menu{color:#ff88ff;border-color:#ff88ff}
-#status{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.7);color:#aaa;font-size:13px;padding:6px 18px;border-radius:20px;pointer-events:none;z-index:50;transition:opacity .4s}
+
+/* ── Status message ── */
+#status{
+  position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
+  background:rgba(0,0,0,.75);color:#aaa;font-size:13px;
+  font-family:'Segoe UI',sans-serif;
+  padding:6px 18px;border-radius:20px;
+  pointer-events:none;z-index:50;transition:opacity .4s;
+}
 #status.hidden{opacity:0}
+
+/* ── Gesture hint bar (bottom of panel) ── */
+#gesture-hint{
+  margin-top:8px;padding:6px 4px 0;
+  border-top:1px solid rgba(255,255,255,0.08);
+  font-family:'Segoe UI',sans-serif;font-size:9px;
+  color:rgba(255,255,255,0.3);line-height:1.6;
+  text-align:center;
+}
 </style>
 </head>
 <body>
-<div id="toolbar">
-  <div id="colors">
-    <span class="tlabel">Color</span>
-    <button class="cbtn active" data-c="#ff0000" style="background:#ff0000"></button>
-    <button class="cbtn" data-c="#00cc00" style="background:#00cc00"></button>
-    <button class="cbtn" data-c="#0066ff" style="background:#0066ff"></button>
-    <button class="cbtn" data-c="#ffcc00" style="background:#ffcc00"></button>
-    <button class="cbtn" data-c="#ffffff" style="background:#ffffff"></button>
-    <button class="cbtn" data-c="#00ffff" style="background:#00ffff"></button>
-    <button class="cbtn" data-c="#cc00ff" style="background:#cc00ff"></button>
-  </div>
-  <div id="brushes">
-    <span class="tlabel">Size</span>
-    <button class="bbtn" data-s="3">S</button>
-    <button class="bbtn active" data-s="6">M</button>
-    <button class="bbtn" data-s="10">L</button>
-    <button class="bbtn" data-s="16">XL</button>
-  </div>
-  <div id="actions">
-    <button id="bundo">&#8617; Undo</button>
-    <button id="bredo">&#8618; Redo</button>
-    <button id="bclear">&#128465; Clear</button>
-    <button id="bsave">&#128190; Save</button>
-  </div>
-  <div id="mdisp">
-    <span id="mlabel">IDLE</span>
-    <span id="fpslabel">-- FPS</span>
-  </div>
-</div>
+
+<!-- Camera + canvas area -->
 <div id="wrap">
   <video id="webcam" autoplay playsinline muted></video>
   <canvas id="dc"></canvas>
   <canvas id="oc"></canvas>
 </div>
+
+<!-- Floating left panel -->
+<div id="panel">
+
+  <div class="sec-title">Color</div>
+  <div id="color-grid">
+    <button class="cbtn active" data-c="#ff0000" data-name="Red"   style="background:#ff0000"></button>
+    <button class="cbtn"        data-c="#00cc00" data-name="Green" style="background:#00cc00"></button>
+    <button class="cbtn"        data-c="#0066ff" data-name="Blue"  style="background:#0066ff"></button>
+    <button class="cbtn"        data-c="#ffcc00" data-name="Yellow"style="background:#ffcc00"></button>
+    <button class="cbtn"        data-c="#ffffff" data-name="White" style="background:#ffffff"></button>
+    <button class="cbtn"        data-c="#00ffff" data-name="Cyan"  style="background:#00ffff"></button>
+    <button class="cbtn"        data-c="#cc00ff" data-name="Purple"style="background:#cc00ff"></button>
+    <button class="cbtn"        data-c="#ff6600" data-name="Orange"style="background:#ff6600"></button>
+  </div>
+
+  <div class="sec-title">Brush Size</div>
+  <div id="brush-list">
+    <button class="bbtn" data-s="3">
+      <span class="bdot" style="width:6px;height:6px"></span>
+      <span class="blabel">S</span><span class="bpx">3px</span>
+    </button>
+    <button class="bbtn active" data-s="6">
+      <span class="bdot" style="width:10px;height:10px"></span>
+      <span class="blabel">M</span><span class="bpx">6px</span>
+    </button>
+    <button class="bbtn" data-s="10">
+      <span class="bdot" style="width:14px;height:14px"></span>
+      <span class="blabel">L</span><span class="bpx">10px</span>
+    </button>
+    <button class="bbtn" data-s="16">
+      <span class="bdot" style="width:18px;height:18px"></span>
+      <span class="blabel">XL</span><span class="bpx">16px</span>
+    </button>
+  </div>
+
+  <div class="sec-title">Actions</div>
+  <div id="action-list">
+    <button class="abtn" id="bundo">↩ Undo</button>
+    <button class="abtn" id="bredo">↪ Redo</button>
+    <button class="abtn" id="bclear">🗑 Clear</button>
+    <button class="abtn" id="bsave">💾 Save</button>
+  </div>
+
+  <button id="btrash">🗑 Delete Stroke</button>
+
+  <div class="gesture-hint" id="gesture-hint">
+    ☝ Draw &nbsp;✌ Cursor<br>
+    ✋ Erase/Pan &nbsp;🤏 Move<br>
+    👐 Zoom &nbsp;👏 Clear
+  </div>
+</div>
+
+<!-- HUD top-right -->
+<div id="hud">
+  <span id="mlabel">IDLE</span>
+  <span id="fpslabel">-- FPS</span>
+</div>
+
+<!-- Flash banner -->
 <div id="banner"></div>
-<div id="status">Requesting camera access&hellip;</div>
+
+<!-- Status -->
+<div id="status">Requesting camera access…</div>
+
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 <script src="/static/js/gesture.js"></script>

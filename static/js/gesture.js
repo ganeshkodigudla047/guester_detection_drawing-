@@ -5,7 +5,7 @@
 const PINCH_THRESH=0.06, SMOOTH=0.35, MIN_PX=6, ERASER_R=40, UNDO_MAX=30, DEBOUNCE=5;
 const BANNER_SECS=1.2, COOLDOWN=0.50, TOOLBAR_Y=80, DWELL_MS=1200, DWELL_R=40;
 const HOLD_SECS=0.5, TAP_MAX=0.40, DBL_SECS=0.50;
-const PALETTE_COLORS=['#ff0000','#00cc00','#0066ff','#ffcc00','#ffffff','#00ffff','#cc00ff'];
+const PALETTE_COLORS=['#ff0000','#00cc00','#0066ff','#ffcc00','#ffffff','#00ffff','#cc00ff','#ff6600'];
 const PALETTE_SIZES=[3,6,10,16];
 
 // DOM
@@ -54,9 +54,11 @@ document.getElementById('bundo').onclick=doUndo;
 document.getElementById('bredo').onclick=doRedo;
 document.getElementById('bclear').onclick=doClear;
 document.getElementById('bsave').onclick=doSave;
+document.getElementById('btrash').onclick=doDeleteStroke;
 document.addEventListener('keydown',e=>{
   if(e.ctrlKey&&e.key==='z')doUndo();
   if(e.ctrlKey&&(e.key==='y'||e.key==='Z'))doRedo();
+  if(e.key==='Delete'||e.key==='Backspace') doDeleteStroke();
 });
 
 // Canvas sizing
@@ -103,6 +105,21 @@ function doRedo(){
 }
 function doClear(){snap();strokes=[];selectedStroke=null;renderStrokes();}
 function doSave(){const a=document.createElement('a');a.download='drawing_'+Date.now()+'.png';a.href=dc.toDataURL();a.click();}
+function doDeleteStroke(){
+  if(!strokes.length)return;
+  snap();
+  if(selectedStroke){
+    strokes=strokes.filter(s=>s.id!==selectedStroke.id);
+    selectedStroke=null;
+  }else{
+    strokes.pop();
+  }
+  renderStrokes();
+  flash('DELETED','erase');
+  // Update trash button state
+  const tb=document.getElementById('btrash');
+  if(tb)tb.classList.remove('has-selection');
+}
 function flash(txt,cls){banner.textContent=txt;banner.className='show '+cls;clearTimeout(bannerTmr);bannerTmr=setTimeout(()=>banner.className='',BANNER_SECS*1000);}
 function setMode(t,c){mlabel.textContent=t;mlabel.style.color=c;}
 
